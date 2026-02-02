@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Barge-In Test for IdliDemo Pipecat.
+Barge-In Test for MiraVoiceAI Pipecat.
 
 This script tests the barge-in (interruption) functionality:
 1. Sends initial audio to start a conversation
@@ -419,7 +419,7 @@ async def test_bargein_server():
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Barge-in test for IdliDemo Pipecat")
+    parser = argparse.ArgumentParser(description="Barge-in test for MiraVoiceAI Pipecat")
     parser.add_argument("--server", action="store_true", help="Test via Pipecat server (requires server running)")
     parser.add_argument("--direct", action="store_true", help="Test components directly")
     parser.add_argument("--generate-audio", action="store_true", help="Generate test audio files")

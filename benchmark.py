@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Performance Benchmark for IdliDemo Pipecat Pipeline.
+Performance Benchmark for MiraVoiceAI Pipecat Pipeline.
 
 Measures:
 - TTFS (Time to First Speech): Time until first audio byte from TTS
@@ -740,7 +740,7 @@ def print_throughput_results(results: dict):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Benchmark IdliDemo Pipecat Pipeline")
+    parser = argparse.ArgumentParser(description="Benchmark MiraVoiceAI Pipecat Pipeline")
     parser.add_argument("--audio", help="Audio file for V2V benchmark")
     parser.add_argument("--iterations", "-n", type=int, default=10, help="Number of iterations")
     parser.add_argument("--warmup", type=int, default=2, help="Warmup iterations")
@@ -758,7 +758,7 @@ async def main():
         args.warmup = 1
 
     print("\n" + "=" * 70)
-    print("IdliDemo Pipecat Pipeline Benchmark")
+    print("MiraVoiceAI Pipecat Pipeline Benchmark")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  STT:  {INDICASR_WS_URL}")

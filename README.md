@@ -1,4 +1,4 @@
-# IdliDemo Pipecat - Voice AI Pipeline
+# MiraVoiceAI Pipecat - Voice AI Pipeline
 
 A Pipecat-based voice AI bot that orchestrates:
 - **IndicASR-Streaming** for Speech-to-Text (WebSocket)
@@ -9,7 +9,7 @@ A Pipecat-based voice AI bot that orchestrates:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     IdliDemo Pipecat Server                      │
+│                     MiraVoiceAI Pipecat Server                      │
 │                      (FastAPI WebSocket)                         │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
@@ -179,19 +179,19 @@ WebSocket /ws
 ### Build
 
 ```bash
-docker build -t idlidemo-pipecat .
+docker build -t mira-voice-ai-pipecat .
 ```
 
 ### Run
 
 ```bash
 docker run -d \
-  --name idlidemo-pipecat \
+  --name mira-voice-ai-pipecat \
   -p 8000:8000 \
   -e ASR_WS_URL=ws://host.docker.internal:8082/v1/audio/speech-to-text/stream \
   -e TTS_WS_URL=ws://host.docker.internal:8080/v1/audio/text-to-speech/stream \
   -e LLM_BASE_URL=http://gpt-oss-120b/v1 \
-  idlidemo-pipecat
+  mira-voice-ai-pipecat
 ```
 
 ## Troubleshooting

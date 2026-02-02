@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Direct Pipeline Test for IdliDemo Pipecat.
+Direct Pipeline Test for MiraVoiceAI Pipecat.
 
 This script tests the STT -> LLM -> TTS pipeline directly without going through
 the WebSocket transport. This allows testing the core pipeline logic.
@@ -246,7 +246,7 @@ async def run_pipeline(
         output_path: Output audio file path
     """
     print("\n" + "=" * 60)
-    print("IdliDemo Pipecat - Direct Pipeline Test")
+    print("MiraVoiceAI Pipecat - Direct Pipeline Test")
     print("=" * 60)
 
     total_start = time.time()
@@ -282,7 +282,7 @@ async def run_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Direct pipeline test for IdliDemo Pipecat")
+    parser = argparse.ArgumentParser(description="Direct pipeline test for MiraVoiceAI Pipecat")
     parser.add_argument("--audio", help="Input audio file (WAV format)")
     parser.add_argument("--text", help="Direct text input (skips STT)")
     parser.add_argument("--voice", default="hi_male", help="TTS voice ID")

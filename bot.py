@@ -1,5 +1,5 @@
 """
-IdliDemo Pipecat Bot - STT -> LLM -> TTS Pipeline with Barge-In Support.
+MiraVoiceAI Pipecat Bot - STT -> LLM -> TTS Pipeline with Barge-In Support.
 
 This bot orchestrates:
 - IndicASR-Streaming for Speech-to-Text (WebSocket)

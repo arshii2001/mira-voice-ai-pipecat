@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Component tests for IdliDemo Pipecat services.
+Component tests for MiraVoiceAI Pipecat services.
 
 Tests individual components (STT, LLM, TTS) before full pipeline integration.
 Run this first to verify all backend services are accessible.
@@ -366,7 +366,7 @@ async def run_all_tests(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test IdliDemo Pipecat components")
+    parser = argparse.ArgumentParser(description="Test MiraVoiceAI Pipecat components")
 
     # Component selection
     parser.add_argument("--all", action="store_true", default=True,

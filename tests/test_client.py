@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test client for IdliDemo Pipecat Server.
+Test client for MiraVoiceAI Pipecat Server.
 
 This client connects to the Pipecat server via WebSocket and tests the
 STT -> LLM -> TTS pipeline with pre-recorded audio or real-time microphone input.
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class PipecatTestClient:
-    """Test client for IdliDemo Pipecat server."""
+    """Test client for MiraVoiceAI Pipecat server."""
 
     def __init__(
         self,
@@ -365,7 +365,7 @@ async def test_config(ws_url: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test IdliDemo Pipecat Server")
+    parser = argparse.ArgumentParser(description="Test MiraVoiceAI Pipecat Server")
     parser.add_argument(
         "--url",
         default="ws://localhost:8000/ws",

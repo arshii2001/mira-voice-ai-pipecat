@@ -1,8 +1,8 @@
 """
-IdliDemo Pipecat Server - FastAPI WebSocket Server
+MiraVoiceAI Pipecat Server - FastAPI WebSocket Server
 
 This server provides a WebSocket endpoint for voice interaction with the
-IdliDemo bot that orchestrates STT -> LLM -> TTS pipeline.
+MiraVoiceAI bot that orchestrates STT -> LLM -> TTS pipeline.
 
 Endpoints:
 - WebSocket /ws - Main bot interaction endpoint
@@ -39,13 +39,13 @@ PORT = int(os.getenv("PORT", "8000"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    logger.info("Starting IdliDemo Pipecat server...")
+    logger.info("Starting MiraVoiceAI Pipecat server...")
     yield
-    logger.info("Shutting down IdliDemo Pipecat server...")
+    logger.info("Shutting down MiraVoiceAI Pipecat server...")
 
 
 app = FastAPI(
-    title="IdliDemo Pipecat Server",
+    title="MiraVoiceAI Pipecat Server",
     description="Voice AI bot with STT -> LLM -> TTS pipeline",
     version="1.0.0",
     lifespan=lifespan,
@@ -64,7 +64,7 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "idlidemo-pipecat"}
+    return {"status": "healthy", "service": "mira-voice-ai-pipecat"}
 
 
 @app.post("/connect")
