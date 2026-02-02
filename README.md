@@ -9,18 +9,18 @@ A Pipecat-based voice AI bot that orchestrates:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     MiraVoiceAI Pipecat Server                      │
-│                      (FastAPI WebSocket)                         │
+│                     MiraVoiceAI Pipecat Server                  │
+│                      (FastAPI WebSocket)                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│    Client Audio ──► STT ──► LLM ──► TTS ──► Audio to Client    │
+│                                                                 │
+│    Client Audio ──► STT ──► LLM ──► TTS ──► Audio to Client     │
 │         ▲                                         │             │
 │         │         ┌──────────┐                    │             │
 │         └─────────│ Pipeline │────────────────────┘             │
 │                   └──────────┘                                  │
-│                                                                  │
+│                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  External Services:                                              │
+│  External Services:                                             │
 │  • IndicASR (ws://localhost:8082) - Streaming ASR               │
 │  • vLLM (http://gpt-oss-120b/v1) - LLM inference                │
 │  • Svara TTS (http://localhost:8080) - TTS synthesis            │
