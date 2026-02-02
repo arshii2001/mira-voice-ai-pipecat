@@ -13,6 +13,8 @@ Endpoints:
 import asyncio
 import logging
 import os
+import signal
+import sys
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -235,13 +237,26 @@ async def list_languages():
     return {"languages": languages}
 
 
-if __name__ == "__main__":
-    uvicorn.run(
-        "server:app",
+def run_server():
+    """Run the server with proper signal handling."""
+    # Handle shutdown signals - use os._exit for immediate termination
+    def signal_handler(signum, frame):
+        print(f"\nReceived signal {signum}, forcing shutdown...")
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    config = uvicorn.Config(
+        app,
         host=HOST,
         port=PORT,
-        workers=1,
-        loop="asyncio",
         access_log=True,
         log_level="info",
     )
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve())
+
+
+if __name__ == "__main__":
+    run_server()

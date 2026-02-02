@@ -42,21 +42,6 @@ docker run -d \
   mira-voice-ai-pipecat
 ```
 
-### Run (Mac with Tailscale)
-
-```bash
-VLLM_IP=$(dig +short vllm-gpt-oss-120b)
-
-docker run -d \
-  --name mira-voice-ai-pipecat \
-  -p 7860:7860 \
-  --add-host=vllm-gpt-oss-120b:$VLLM_IP \
-  -e SONIOX_API_KEY=your_soniox_key \
-  -e ELEVENLABS_API_KEY=your_elevenlabs_key \
-  -e LLM_BASE_URL=http://vllm-gpt-oss-120b/v1 \
-  mira-voice-ai-pipecat
-```
-
 ## Environment Variables
 
 | Variable | Required | Default | Description |
