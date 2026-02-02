@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 INDICASR_WS_URL = os.getenv("INDICASR_WS_URL", "ws://localhost:8082/v1/audio/stream")
 SVARA_TTS_URL = os.getenv("SVARA_TTS_URL", "http://localhost:8080")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/vllm-gpt-oss-120b")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 
 SYSTEM_PROMPT = """You are Idli, a helpful AI assistant. Keep responses to 1-2 sentences."""
 

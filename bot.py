@@ -152,7 +152,7 @@ class GreetingProcessor(FrameProcessor):
 ASR_WS_URL = os.getenv("ASR_WS_URL", "ws://localhost:8082/v1/audio/speech-to-text/stream")
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://vllm-svara-tts/v1/audio/text-to-speech/stream")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/vllm-gpt-oss-120b")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
 
 # STT configuration (Soniox)
