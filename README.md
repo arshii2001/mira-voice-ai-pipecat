@@ -4,12 +4,22 @@ Voice AI pipeline using Pipecat with Soniox STT and ElevenLabs TTS.
 
 ## Quick Start
 
+1. Install dependencies:
 ```bash
-pip install -r requirements.txt
+uv sync
+```
+
+2. Set environment variables:
+```bash
 export SONIOX_API_KEY=your_soniox_key
 export ELEVENLABS_API_KEY=your_elevenlabs_key
 export LLM_BASE_URL=http://vllm-gpt-oss-120b/v1
-python server.py
+# Note: Change this to your together.ai or groq endpoint
+```
+
+3. Run the server:
+```bash
+uv run python server.py
 ```
 
 ## Docker
@@ -63,26 +73,26 @@ docker run -d \
 To quickly test the voice agent, use the Pipecat examples WebSocket client:
 
 1. Clone the pipecat-examples repository:
-   ```bash
-   git clone https://github.com/pipecat-ai/pipecat-examples.git
-   ```
+```bash
+git clone https://github.com/pipecat-ai/pipecat-examples.git
+```
 
 2. Navigate to the WebSocket client directory:
-   ```bash
-   cd pipecat-examples/websocket/client
-   ```
+```bash
+cd pipecat-examples/websocket/client
+```
 
 3. Install dependencies:
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+```
 
 4. Start the client:
-   ```bash
-   npm run dev
-   ```
+```bash
+npm run dev
+```
 
-5. Open the URL shown in the terminal (typically `http://localhost:5173`)
+5. Open the URL shown in the terminal (typically `http://localhost:xxxx`)
 
 6. Click connect and start talking to the voice agent
 
