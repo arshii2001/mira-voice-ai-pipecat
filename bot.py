@@ -55,8 +55,9 @@ from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 
-from services.indicasr_stt import IndicASRSTTService
 from services.svara_tts import SvaraTTSService
+from services.soniox_stt import SonioxSTTService
+from services.elevenlabs_tts import create_elevenlabs_tts
 
 # Configure logging
 logging.basicConfig(
@@ -150,11 +151,19 @@ class GreetingProcessor(FrameProcessor):
 # Environment configuration
 ASR_WS_URL = os.getenv("ASR_WS_URL", "ws://localhost:8082/v1/audio/speech-to-text/stream")
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://vllm-svara-tts/v1/audio/text-to-speech/stream")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://gpt-oss-120b/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/vllm-gpt-oss-120b")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
 
-# Voice configuration
+# STT configuration (Soniox)
+SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", "")
+
+# TTS Provider configuration
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")  # "elevenlabs" or "svara"
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" or "male"
+
+# Voice configuration (for Svara TTS fallback)
 DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "hi_male")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
@@ -180,6 +189,7 @@ async def create_bot_pipeline(
     sample_rate: int = 16000,
     voice: str = DEFAULT_VOICE,
     language: str = DEFAULT_LANGUAGE,
+    context_messages: list = None,
 ) -> tuple[PipelineTask, PipelineRunner]:
     """
     Create and configure the bot pipeline.
@@ -216,22 +226,45 @@ async def create_bot_pipeline(
         ),
     )
 
-    # Initialize STT service (interim_results=False for efficiency - only transcribe on FINALIZE)
-    stt = IndicASRSTTService(
-        ws_url=ASR_WS_URL,
-        language=language,
-        interim_results=False,  # Finalize-only mode for lower latency
+    # === STT Service (Soniox only) ===
+    if not SONIOX_API_KEY:
+        raise ValueError("SONIOX_API_KEY environment variable is required")
+
+    logger.info("Using Soniox STT provider")
+    stt = SonioxSTTService(
+        api_key=SONIOX_API_KEY,
+        language_hints=["en", "hi", "ta", "te", "bn", "kn", "mr", "ml", "gu", "pa"],
+        enable_speaker_diarization=True,
         sample_rate=sample_rate,
     )
 
-    # Initialize TTS service (always use hi_male voice for consistent output)
-    tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
-    tts = SvaraTTSService(
-        base_url=tts_base_url,
-        voice=DEFAULT_VOICE,  # Always use hi_male voice
-        streaming=True,
-        sample_rate=24000,  # Svara outputs 24kHz audio
-    )
+    # === TTS Service Selection ===
+    if TTS_PROVIDER == "elevenlabs":
+        if not ELEVENLABS_API_KEY:
+            logger.warning("ELEVENLABS_API_KEY not set, falling back to Svara TTS")
+            tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
+            tts = SvaraTTSService(
+                base_url=tts_base_url,
+                voice=DEFAULT_VOICE,
+                streaming=True,
+                sample_rate=24000,
+            )
+        else:
+            logger.info(f"Using ElevenLabs TTS provider (voice_gender={TTS_VOICE_GENDER})")
+            tts = create_elevenlabs_tts(
+                api_key=ELEVENLABS_API_KEY,
+                voice_gender=TTS_VOICE_GENDER,
+                sample_rate=24000,
+            )
+    else:
+        logger.info("Using Svara TTS provider")
+        tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
+        tts = SvaraTTSService(
+            base_url=tts_base_url,
+            voice=DEFAULT_VOICE,
+            streaming=True,
+            sample_rate=24000,
+        )
 
     # Initialize LLM service
     llm = OpenAILLMService(
@@ -241,11 +274,12 @@ async def create_bot_pipeline(
     )
 
     # === Modern LLM Context Setup ===
-    context = LLMContext(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-        ]
-    )
+    # Build initial messages with system prompt and optional user-provided context
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if context_messages:
+        messages.extend(context_messages)
+
+    context = LLMContext(messages=messages)
 
     aggregator_pair = LLMContextAggregatorPair(
         context,
@@ -299,6 +333,7 @@ async def run_bot(
     sample_rate: int = 16000,
     voice: str = DEFAULT_VOICE,
     language: str = DEFAULT_LANGUAGE,
+    context_messages: list = None,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -314,6 +349,7 @@ async def run_bot(
         sample_rate=sample_rate,
         voice=voice,
         language=language,
+        context_messages=context_messages,
     )
 
     try:

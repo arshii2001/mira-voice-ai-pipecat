@@ -21,7 +21,19 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from bot import run_bot, DEFAULT_VOICE, DEFAULT_LANGUAGE, ASR_WS_URL, TTS_WS_URL, LLM_BASE_URL, LLM_MODEL
+from bot import (
+    run_bot,
+    DEFAULT_VOICE,
+    DEFAULT_LANGUAGE,
+    TTS_WS_URL,
+    LLM_BASE_URL,
+    LLM_MODEL,
+    SONIOX_API_KEY,
+    TTS_PROVIDER,
+    ELEVENLABS_API_KEY,
+    TTS_VOICE_GENDER,
+)
+from services.elevenlabs_tts import VOICE_PRESETS
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Server configuration
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "8000"))
+PORT = int(os.getenv("PORT", "7860"))
 
 
 @asynccontextmanager
@@ -77,8 +89,12 @@ async def connect():
 async def get_config():
     """Get current server configuration."""
     return {
-        "asr_ws_url": ASR_WS_URL,
+        "stt_provider": "soniox",
+        "soniox_api_key_set": bool(SONIOX_API_KEY),
+        "tts_provider": TTS_PROVIDER,
         "tts_ws_url": TTS_WS_URL,
+        "elevenlabs_api_key_set": bool(ELEVENLABS_API_KEY),
+        "tts_voice_gender": TTS_VOICE_GENDER,
         "llm_base_url": LLM_BASE_URL,
         "llm_model": LLM_MODEL,
         "default_voice": DEFAULT_VOICE,
@@ -98,19 +114,39 @@ async def websocket_endpoint(
 
     Protocol:
     1. Client connects with optional query params (voice, language, sample_rate)
-    2. Client sends audio as binary PCM16 frames
-    3. Server sends transcriptions and audio responses
-    4. Connection stays open for continuous conversation
+    2. Client sends optional JSON config message: {"type": "config", "context": [...]}
+    3. Client sends audio as binary PCM16 frames
+    4. Server sends transcriptions and audio responses
+    5. Connection stays open for continuous conversation
 
     Query Parameters:
         voice: TTS voice ID (default: hi_male)
         language: STT language (default: auto)
         sample_rate: Audio sample rate (default: 16000)
+
+    Config Message (optional):
+        Send as first message after connection:
+        {"type": "config", "context": [{"role": "user", "content": "..."}, ...]}
     """
     await websocket.accept()
     import uuid
     session_id = str(uuid.uuid4())[:8]
     logger.info(f"[{session_id}] Client connected: language={language}, sample_rate={sample_rate}Hz (voice forced to hi_male)")
+
+    # Wait for optional initial config message (with timeout)
+    context_messages = None
+    try:
+        config_data = await asyncio.wait_for(
+            websocket.receive_json(),
+            timeout=5.0
+        )
+        if config_data.get("type") == "config":
+            context_messages = config_data.get("context", [])
+            logger.info(f"[{session_id}] Received config with {len(context_messages)} context messages")
+    except asyncio.TimeoutError:
+        logger.debug(f"[{session_id}] No config message received, using defaults")
+    except Exception as e:
+        logger.debug(f"[{session_id}] Config message parse error: {e}, using defaults")
 
     try:
         await run_bot(
@@ -118,6 +154,7 @@ async def websocket_endpoint(
             sample_rate=sample_rate,
             voice=voice,
             language=language,
+            context_messages=context_messages,
         )
     except WebSocketDisconnect:
         logger.info(f"[{session_id}] Client disconnected")
@@ -133,24 +170,47 @@ async def websocket_endpoint(
 @app.get("/voices")
 async def list_voices():
     """List available TTS voices."""
-    # Common voice IDs for Svara TTS
-    voices = [
-        {"id": "hi_male", "name": "Hindi (Male)", "language": "Hindi"},
-        {"id": "hi_female", "name": "Hindi (Female)", "language": "Hindi"},
-        {"id": "en_male", "name": "English (Male)", "language": "English"},
-        {"id": "en_female", "name": "English (Female)", "language": "English"},
-        {"id": "ta_male", "name": "Tamil (Male)", "language": "Tamil"},
-        {"id": "ta_female", "name": "Tamil (Female)", "language": "Tamil"},
-        {"id": "te_male", "name": "Telugu (Male)", "language": "Telugu"},
-        {"id": "te_female", "name": "Telugu (Female)", "language": "Telugu"},
-        {"id": "bn_male", "name": "Bengali (Male)", "language": "Bengali"},
-        {"id": "bn_female", "name": "Bengali (Female)", "language": "Bengali"},
-        {"id": "mr_male", "name": "Marathi (Male)", "language": "Marathi"},
-        {"id": "mr_female", "name": "Marathi (Female)", "language": "Marathi"},
-        {"id": "kn_male", "name": "Kannada (Male)", "language": "Kannada"},
-        {"id": "kn_female", "name": "Kannada (Female)", "language": "Kannada"},
+    # Svara TTS voices
+    svara_voices = [
+        {"id": "hi_male", "name": "Hindi (Male)", "language": "Hindi", "provider": "svara"},
+        {"id": "hi_female", "name": "Hindi (Female)", "language": "Hindi", "provider": "svara"},
+        {"id": "en_male", "name": "English (Male)", "language": "English", "provider": "svara"},
+        {"id": "en_female", "name": "English (Female)", "language": "English", "provider": "svara"},
+        {"id": "ta_male", "name": "Tamil (Male)", "language": "Tamil", "provider": "svara"},
+        {"id": "ta_female", "name": "Tamil (Female)", "language": "Tamil", "provider": "svara"},
+        {"id": "te_male", "name": "Telugu (Male)", "language": "Telugu", "provider": "svara"},
+        {"id": "te_female", "name": "Telugu (Female)", "language": "Telugu", "provider": "svara"},
+        {"id": "bn_male", "name": "Bengali (Male)", "language": "Bengali", "provider": "svara"},
+        {"id": "bn_female", "name": "Bengali (Female)", "language": "Bengali", "provider": "svara"},
+        {"id": "mr_male", "name": "Marathi (Male)", "language": "Marathi", "provider": "svara"},
+        {"id": "mr_female", "name": "Marathi (Female)", "language": "Marathi", "provider": "svara"},
+        {"id": "kn_male", "name": "Kannada (Male)", "language": "Kannada", "provider": "svara"},
+        {"id": "kn_female", "name": "Kannada (Female)", "language": "Kannada", "provider": "svara"},
     ]
-    return {"voices": voices}
+
+    # ElevenLabs voices
+    elevenlabs_voices = [
+        {
+            "id": VOICE_PRESETS["female"]["id"],
+            "name": VOICE_PRESETS["female"]["name"],
+            "language": "Multilingual",
+            "provider": "elevenlabs",
+            "gender": "female",
+        },
+        {
+            "id": VOICE_PRESETS["male"]["id"],
+            "name": VOICE_PRESETS["male"]["name"],
+            "language": "Multilingual",
+            "provider": "elevenlabs",
+            "gender": "male",
+        },
+    ]
+
+    return {
+        "voices": svara_voices + elevenlabs_voices,
+        "current_provider": TTS_PROVIDER,
+        "current_voice_gender": TTS_VOICE_GENDER,
+    }
 
 
 @app.get("/languages")

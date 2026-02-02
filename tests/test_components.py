@@ -156,8 +156,8 @@ async def test_stt(
 
 
 async def test_llm(
-    base_url: str = "http://gpt-oss-120b/v1",
-    model: str = "openai/gpt-oss-120b",
+    base_url: str = "http://vllm-gpt-oss-120b/v1",
+    model: str = "openai/vllm-gpt-oss-120b",
     api_key: str = "not-needed",
 ) -> bool:
     """
@@ -378,7 +378,7 @@ def main():
     # URLs
     parser.add_argument("--stt-url", default="ws://localhost:8082/v1/audio/speech-to-text/stream",
                         help="IndicASR WebSocket URL")
-    parser.add_argument("--llm-url", default="http://gpt-oss-120b/v1",
+    parser.add_argument("--llm-url", default="http://vllm-gpt-oss-120b/v1",
                         help="vLLM API base URL")
     parser.add_argument("--tts-url", default="http://localhost:8080",
                         help="Svara TTS base URL")
@@ -388,7 +388,7 @@ def main():
     parser.add_argument("--language", default="auto", help="STT language")
     parser.add_argument("--voice", default="hi_male", help="TTS voice")
     parser.add_argument("--text", help="Text for TTS test")
-    parser.add_argument("--llm-model", default="openai/gpt-oss-120b",
+    parser.add_argument("--llm-model", default="openai/vllm-gpt-oss-120b",
                         help="LLM model name")
 
     args = parser.parse_args()

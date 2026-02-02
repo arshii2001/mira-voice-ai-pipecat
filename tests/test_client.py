@@ -49,7 +49,7 @@ class PipecatTestClient:
 
     def __init__(
         self,
-        ws_url: str = "ws://localhost:8000/ws",
+        ws_url: str = "ws://localhost:7860/ws",
         voice: str = "hi_male",
         language: str = "auto",
         sample_rate: int = 16000,
@@ -368,8 +368,8 @@ def main():
     parser = argparse.ArgumentParser(description="Test MiraVoiceAI Pipecat Server")
     parser.add_argument(
         "--url",
-        default="ws://localhost:8000/ws",
-        help="WebSocket URL (default: ws://localhost:8000/ws)"
+        default="ws://localhost:7860/ws",
+        help="WebSocket URL (default: ws://localhost:7860/ws)"
     )
     parser.add_argument(
         "--audio",

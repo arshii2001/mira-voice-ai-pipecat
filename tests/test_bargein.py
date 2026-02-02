@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 # Configuration
 ASR_WS_URL = os.getenv("ASR_WS_URL", "ws://localhost:8082/v1/audio/speech-to-text/stream")
 TTS_BASE_URL = os.getenv("TTS_BASE_URL", "http://localhost:8080")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://gpt-oss-120b/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
-PIPECAT_WS_URL = os.getenv("PIPECAT_WS_URL", "ws://localhost:8000/ws")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
+LLM_MODEL = os.getenv("LLM_MODEL", "openai/vllm-gpt-oss-120b")
+PIPECAT_WS_URL = os.getenv("PIPECAT_WS_URL", "ws://localhost:7860/ws")
 
 TEST_AUDIO_DIR = Path(__file__).parent / "test_audio"
 

@@ -1,21 +1,21 @@
-# Pipecat Core
-pipecat-ai[websocket,openai,silero]>=0.0.70
+# Pipecat Core (pinned for stable builds)
+pipecat-ai[websocket,openai,silero,elevenlabs]==0.0.98
 
-# FastAPI server
-fastapi>=0.104.0
-uvicorn>=0.24.0
-python-dotenv>=1.0.0
+# FastAPI server (must be >=0.115.6 and <0.122.0 for pipecat-ai 0.0.98)
+fastapi==0.115.6
+uvicorn==0.32.0
+python-dotenv==1.0.1
 
 # WebSocket client for STT
-websockets>=12.0
+websockets==14.0
 
-# HTTP client for TTS
-aiohttp>=3.9.0
+# HTTP client for TTS (must be >=3.11.12 for pipecat-ai 0.0.98)
+aiohttp==3.11.12
 
 # Audio processing
-numpy>=1.24.0
-scipy>=1.11.0
+numpy==1.26.4
+scipy==1.14.1
 
 # Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
+pytest==8.3.3
+pytest-asyncio==0.24.0

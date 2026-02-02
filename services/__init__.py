@@ -1,6 +1,13 @@
-"""Custom Pipecat services for IndicASR STT and Svara TTS."""
+"""Custom Pipecat services for STT and TTS providers."""
 
-from .indicasr_stt import IndicASRSTTService
 from .svara_tts import SvaraTTSService
+from .soniox_stt import SonioxSTTService
+from .elevenlabs_tts import create_elevenlabs_tts, get_available_voices, VOICE_PRESETS
 
-__all__ = ["IndicASRSTTService", "SvaraTTSService"]
+__all__ = [
+    "SvaraTTSService",
+    "SonioxSTTService",
+    "create_elevenlabs_tts",
+    "get_available_voices",
+    "VOICE_PRESETS",
+]
