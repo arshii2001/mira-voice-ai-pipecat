@@ -39,6 +39,9 @@ docker run -d \
   -e SONIOX_API_KEY=$SONIOX_API_KEY \
   -e ELEVENLABS_API_KEY=$ELEVENLABS_API_KEY \
   -e LLM_BASE_URL=http://vllm-gpt-oss-120b/v1 \
+  -e LLM_API_KEY=$LLM_API_KEY \
+  -e TTS_VOICE_GENDER=female \
+  -e PROMPT_VERSION=v0 \
   mira-voice-ai-pipecat
 ```
 
@@ -46,12 +49,16 @@ docker run -d \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SONIOX_API_KEY` | Yes | - | Soniox API key |
-| `ELEVENLABS_API_KEY` | Yes | - | ElevenLabs API key |
-| `LLM_BASE_URL` | No | `http://vllm-gpt-oss-120b/v1` | LLM API endpoint |
+| `SONIOX_API_KEY` | Yes | - | Soniox API key for STT |
+| `ELEVENLABS_API_KEY` | Yes* | - | ElevenLabs API key (*required if TTS_PROVIDER=elevenlabs) |
+| `LLM_BASE_URL` | No | `http://vllm-gpt-oss-120b/v1` | LLM API endpoint (OpenAI-compatible) |
 | `LLM_MODEL` | No | `openai/gpt-oss-120b` | LLM model name |
+| `LLM_API_KEY` | No | `DUMMY_KEY` | LLM API key (for authenticated endpoints) |
 | `TTS_PROVIDER` | No | `elevenlabs` | TTS provider: `elevenlabs` or `svara` |
-| `TTS_VOICE_GENDER` | No | `female` | Voice gender: `female` or `male` |
+| `TTS_VOICE_GENDER` | No | `female` | Initial voice gender: `female` or `male` |
+| `PROMPT_VERSION` | No | `v0` | System prompt version (loads from `prompts/{version}.md`) |
+| `SYSTEM_PROMPT` | No | - | Override system prompt entirely (ignores PROMPT_VERSION) |
+| `GREETING_TEXT` | No | `Hi, I'm Mira!...` | Initial greeting spoken on connection |
 
 ## Testing with the WebSocket Client
 

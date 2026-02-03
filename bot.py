@@ -35,6 +35,7 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     TTSStoppedFrame,
+    TTSUpdateSettingsFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
@@ -54,6 +55,9 @@ from pipecat.transports.websocket.fastapi import (
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.services.llm_service import FunctionCallParams
 
 from services.svara_tts import SvaraTTSService
 from services.soniox_stt import SonioxSTTService
@@ -65,6 +69,48 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+class VoiceStateManager:
+    """Manages the current voice state for voice switching functionality."""
+
+    VOICE_IDS = {
+        "female": "2zRM7PkgwBPiau2jvVXc",  # Monika Sogam
+        "male": "siw1N9V8LmYeEWKyWBxv",    # Ruhaan
+    }
+
+    def __init__(self, initial_gender: str = "female"):
+        self._current_gender = initial_gender
+
+    @property
+    def current_gender(self) -> str:
+        return self._current_gender
+
+    @property
+    def current_voice_id(self) -> str:
+        return self.VOICE_IDS[self._current_gender]
+
+    def switch_voice(self, mode: str) -> tuple[str, str]:
+        """Switch voice based on mode. Returns (new_gender, new_voice_id)."""
+        if mode == "switch":
+            self._current_gender = "male" if self._current_gender == "female" else "female"
+        elif mode in ("male", "female"):
+            self._current_gender = mode
+        return self._current_gender, self.current_voice_id
+
+
+SELECT_VOICE_SCHEMA = FunctionSchema(
+    name="select_voice",
+    description="Switch the assistant's voice between male and female. Use this when the user asks to change the voice, switch voice, wants a different voice, or asks for a male/female voice.",
+    properties={
+        "mode": {
+            "type": "string",
+            "enum": ["switch", "male", "female"],
+            "description": "The voice selection mode: 'switch' to toggle current voice, 'male' to use male voice, 'female' to use female voice"
+        }
+    },
+    required=["mode"]
+)
 
 
 class TranscriptLogger(FrameProcessor):
@@ -167,21 +213,28 @@ TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" or "male"
 DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "hi_male")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
-# System prompt for the assistant - handles multilingual input, always responds in English
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", """You are a helpful, friendly AI voice assistant.
+# Prompt configuration
+PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v0")
 
-IMPORTANT INSTRUCTIONS:
-1. The user may speak to you in ANY language (Hindi, Kannada, Tamil, Telugu, Bengali, etc.)
-2. You MUST understand what they said and ALWAYS respond in English only
-3. Keep responses concise (1-3 sentences) - you are in a voice conversation
-4. Be natural, warm, and conversational
-5. If you don't understand something, politely ask for clarification in English
 
-You are excellent at understanding multiple languages but you always speak English.""")
+def load_system_prompt(version: str = PROMPT_VERSION) -> str:
+    """Load system prompt from prompts directory."""
+    prompt_path = os.path.join(PROMPT_DIR, f"{version}.md")
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning(f"Prompt file not found: {prompt_path}, using default")
+        return "You are a helpful voice assistant. Keep responses concise."
+
+
+# System prompt for the assistant - loaded from prompts/{version}.md
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT") or load_system_prompt()
 
 # Greeting text spoken when connection is established
 GREETING_TEXT = os.getenv("GREETING_TEXT",
-    "Hello! I'm your voice assistant. I can understand you in any language, but I'll respond in English. How can I help you today?")
+    "Hi, I'm Mira! I can chat with you in any language - just speak naturally. How can I help you today?")
 
 
 async def create_bot_pipeline(
@@ -266,6 +319,9 @@ async def create_bot_pipeline(
             sample_rate=24000,
         )
 
+    # Voice state manager for runtime voice switching
+    voice_state = VoiceStateManager(initial_gender=TTS_VOICE_GENDER)
+
     # Initialize LLM service
     llm = OpenAILLMService(
         api_key=LLM_API_KEY,
@@ -273,13 +329,38 @@ async def create_bot_pipeline(
         model=LLM_MODEL,
     )
 
+    # === Register Function Handler for Voice Switching ===
+    async def handle_select_voice(params: FunctionCallParams):
+        """Handle voice switching function call from LLM."""
+        mode = params.arguments.get("mode", "switch")
+        new_gender, new_voice_id = voice_state.switch_voice(mode)
+
+        # Directly update the TTS voice and force reconnection
+        tts._voice_id = new_voice_id
+        await tts._disconnect()
+        await tts._connect()
+
+        logger.info(f"[VOICE SWITCH] Mode: {mode}, New voice: {new_gender} ({new_voice_id})")
+
+        # Return result to LLM so it can acknowledge the change
+        await params.result_callback({
+            "success": True,
+            "new_voice": new_gender,
+            "message": f"Voice switched to {new_gender}"
+        })
+
+    llm.register_function("select_voice", handle_select_voice)
+
+    # === Tools Schema for Function Calling ===
+    tools = ToolsSchema(standard_tools=[SELECT_VOICE_SCHEMA])
+
     # === Modern LLM Context Setup ===
     # Build initial messages with system prompt and optional user-provided context
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if context_messages:
         messages.extend(context_messages)
 
-    context = LLMContext(messages=messages)
+    context = LLMContext(messages=messages, tools=tools)
 
     aggregator_pair = LLMContextAggregatorPair(
         context,
