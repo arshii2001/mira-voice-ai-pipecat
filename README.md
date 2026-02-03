@@ -36,8 +36,8 @@ docker build -t mira-voice-ai-pipecat .
 docker run -d \
   --name mira-voice-ai-pipecat \
   --network=host \
-  -e SONIOX_API_KEY=your_soniox_key \
-  -e ELEVENLABS_API_KEY=your_elevenlabs_key \
+  -e SONIOX_API_KEY=$SONIOX_API_KEY \
+  -e ELEVENLABS_API_KEY=$ELEVENLABS_API_KEY \
   -e LLM_BASE_URL=http://vllm-gpt-oss-120b/v1 \
   mira-voice-ai-pipecat
 ```

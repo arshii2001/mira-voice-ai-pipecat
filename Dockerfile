@@ -34,9 +34,9 @@ ENV DEFAULT_LANGUAGE="auto"
 # Expose port
 EXPOSE 7860
 
-# Health check
+# Health check (uses -k to skip SSL verification for self-signed certs)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:7860/health || exit 1
+    CMD curl -kf https://localhost:7860/health || curl -f http://localhost:7860/health || exit 1
 
-# Run server
-CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "7860"]
+# Run server using the entry point with signal handling
+CMD ["python", "server.py"]

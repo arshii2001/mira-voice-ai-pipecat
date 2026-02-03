@@ -83,8 +83,16 @@ async def health_check():
 
 @app.post("/connect")
 async def connect():
-    """Return WebSocket URL for Pipecat client connection."""
-    return {"wsUrl": f"ws://localhost:{PORT}/ws"}
+    """Return WebSocket URL for direct connection to backend."""
+    public_host = os.getenv("PUBLIC_HOST", "hp-fury")
+
+    # Check if SSL is enabled (same logic as run_server)
+    ssl_keyfile = os.getenv("SSL_KEYFILE", "hp-fury+1-key.pem")
+    ssl_certfile = os.getenv("SSL_CERTFILE", "hp-fury+1.pem")
+    use_ssl = os.path.exists(ssl_keyfile) and os.path.exists(ssl_certfile)
+
+    protocol = "wss" if use_ssl else "ws"
+    return {"ws_url": f"{protocol}://{public_host}:{PORT}/ws"}
 
 
 @app.get("/config")
@@ -105,68 +113,16 @@ async def get_config():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(
-    websocket: WebSocket,
-    voice: str = Query(default=DEFAULT_VOICE, description="TTS voice ID"),
-    language: str = Query(default=DEFAULT_LANGUAGE, description="STT language code"),
-    sample_rate: int = Query(default=16000, description="Audio sample rate"),
-):
-    """
-    WebSocket endpoint for voice interaction.
-
-    Protocol:
-    1. Client connects with optional query params (voice, language, sample_rate)
-    2. Client sends optional JSON config message: {"type": "config", "context": [...]}
-    3. Client sends audio as binary PCM16 frames
-    4. Server sends transcriptions and audio responses
-    5. Connection stays open for continuous conversation
-
-    Query Parameters:
-        voice: TTS voice ID (default: hi_male)
-        language: STT language (default: auto)
-        sample_rate: Audio sample rate (default: 16000)
-
-    Config Message (optional):
-        Send as first message after connection:
-        {"type": "config", "context": [{"role": "user", "content": "..."}, ...]}
-    """
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for voice interaction."""
     await websocket.accept()
-    import uuid
-    session_id = str(uuid.uuid4())[:8]
-    logger.info(f"[{session_id}] Client connected: language={language}, sample_rate={sample_rate}Hz (voice forced to hi_male)")
-
-    # Wait for optional initial config message (with timeout)
-    context_messages = None
+    logger.info("WebSocket connection accepted")
     try:
-        config_data = await asyncio.wait_for(
-            websocket.receive_json(),
-            timeout=5.0
-        )
-        if config_data.get("type") == "config":
-            context_messages = config_data.get("context", [])
-            logger.info(f"[{session_id}] Received config with {len(context_messages)} context messages")
-    except asyncio.TimeoutError:
-        logger.debug(f"[{session_id}] No config message received, using defaults")
-    except Exception as e:
-        logger.debug(f"[{session_id}] Config message parse error: {e}, using defaults")
-
-    try:
-        await run_bot(
-            websocket=websocket,
-            sample_rate=sample_rate,
-            voice=voice,
-            language=language,
-            context_messages=context_messages,
-        )
+        await run_bot(websocket=websocket)
     except WebSocketDisconnect:
-        logger.info(f"[{session_id}] Client disconnected")
+        logger.info("Client disconnected")
     except Exception as e:
-        logger.error(f"[{session_id}] WebSocket error: {e}")
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        logger.error(f"WebSocket error: {e}")
 
 
 @app.get("/voices")
@@ -247,13 +203,27 @@ def run_server():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    config = uvicorn.Config(
-        app,
-        host=HOST,
-        port=PORT,
-        access_log=True,
-        log_level="info",
-    )
+    # Check for SSL certificates
+    ssl_keyfile = os.getenv("SSL_KEYFILE", "hp-fury+1-key.pem")
+    ssl_certfile = os.getenv("SSL_CERTFILE", "hp-fury+1.pem")
+    use_ssl = os.path.exists(ssl_keyfile) and os.path.exists(ssl_certfile)
+
+    config_kwargs = {
+        "app": app,
+        "host": HOST,
+        "port": PORT,
+        "access_log": True,
+        "log_level": "info",
+    }
+
+    if use_ssl:
+        config_kwargs["ssl_keyfile"] = ssl_keyfile
+        config_kwargs["ssl_certfile"] = ssl_certfile
+        logger.info(f"Starting server with HTTPS on port {PORT}")
+    else:
+        logger.info(f"Starting server with HTTP on port {PORT}")
+
+    config = uvicorn.Config(**config_kwargs)
     server = uvicorn.Server(config)
     asyncio.run(server.serve())
 

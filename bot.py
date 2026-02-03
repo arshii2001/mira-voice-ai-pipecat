@@ -190,7 +190,7 @@ async def create_bot_pipeline(
     voice: str = DEFAULT_VOICE,
     language: str = DEFAULT_LANGUAGE,
     context_messages: list = None,
-) -> tuple[PipelineTask, PipelineRunner]:
+) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
 
@@ -201,7 +201,7 @@ async def create_bot_pipeline(
         language: STT language code
 
     Returns:
-        Tuple of (PipelineTask, PipelineRunner)
+        Tuple of (PipelineTask, PipelineRunner, Transport)
     """
     logger.info(f"Creating pipeline: language={language}, voice={DEFAULT_VOICE}, interim_results=False")
 
@@ -325,7 +325,7 @@ async def create_bot_pipeline(
 
     runner = PipelineRunner()
 
-    return task, runner
+    return task, runner, transport
 
 
 async def run_bot(
@@ -344,13 +344,23 @@ async def run_bot(
         voice: TTS voice ID
         language: STT language code
     """
-    task, runner = await create_bot_pipeline(
+    task, runner, transport = await create_bot_pipeline(
         websocket,
         sample_rate=sample_rate,
         voice=voice,
         language=language,
         context_messages=context_messages,
     )
+
+    # Add transport event handlers for proper RTVI protocol support
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Pipecat client connected")
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Pipecat client disconnected")
+        await task.cancel()
 
     try:
         await runner.run(task)
