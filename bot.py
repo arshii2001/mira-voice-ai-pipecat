@@ -215,7 +215,7 @@ DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
 # Prompt configuration
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v0")
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v3")
 
 
 def load_system_prompt(version: str = PROMPT_VERSION) -> str:
