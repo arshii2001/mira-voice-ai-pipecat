@@ -16,20 +16,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# TTS Configuration
-ENV TTS_PROVIDER="elevenlabs"
-ENV TTS_VOICE_GENDER="female"
-ENV TTS_WS_URL="ws://localhost:8080/v1/audio/text-to-speech/stream"
-ENV DEFAULT_VOICE="hi_male"
+# Copy and setup entrypoint script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
-# LLM Configuration
-ENV LLM_BASE_URL="http://vllm-gpt-oss-120b/v1"
-ENV LLM_MODEL="openai/gpt-oss-120b"
-
-# Server Configuration
-ENV HOST="0.0.0.0"
-ENV PORT="7860"
-ENV DEFAULT_LANGUAGE="auto"
+# Copy .env file for default environment variables
+# These can be overridden at runtime with: docker run -e VAR=value
+COPY .env /app/.env
 
 # Expose port
 EXPOSE 7860
@@ -38,5 +31,6 @@ EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -kf https://localhost:7860/health || curl -f http://localhost:7860/health || exit 1
 
-# Run server using the entry point with signal handling
+# Use entrypoint to load .env, then run server
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["python", "server.py"]

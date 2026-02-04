@@ -11,21 +11,18 @@ Endpoints:
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
-import sys
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from bot import (
     run_bot,
-    DEFAULT_VOICE,
     DEFAULT_LANGUAGE,
     TTS_WS_URL,
     LLM_BASE_URL,
@@ -107,9 +104,72 @@ async def get_config():
         "tts_voice_gender": TTS_VOICE_GENDER,
         "llm_base_url": LLM_BASE_URL,
         "llm_model": LLM_MODEL,
-        "default_voice": DEFAULT_VOICE,
+        "default_voice": "en_female",  # Hardcoded default
         "default_language": DEFAULT_LANGUAGE,
+        "supported_languages": ["en", "hi", "ta", "kn"],
     }
+
+
+async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> dict:
+    """
+    Wait for an optional config message from the client.
+
+    Expected format:
+    {
+        "type": "config",
+        "system_prompt": "...",  // optional
+        "context": [...]        // optional
+    }
+
+    Returns dict with system_prompt and context (may be None).
+    """
+    try:
+        # Wait for a message with timeout
+        message = await asyncio.wait_for(websocket.receive_text(), timeout=timeout)
+        data = json.loads(message)
+
+        # Check if it's a config message
+        if data.get("type") == "config":
+            logger.info("Received client config message")
+
+            # Extract and validate system_prompt
+            system_prompt = data.get("system_prompt")
+            if system_prompt and not isinstance(system_prompt, str):
+                logger.warning("Invalid system_prompt type, ignoring")
+                system_prompt = None
+
+            # Extract and validate context
+            context = data.get("context")
+            if context:
+                if not isinstance(context, list):
+                    logger.warning("Invalid context type, ignoring")
+                    context = None
+                else:
+                    # Filter valid context entries
+                    valid_context = []
+                    for entry in context:
+                        if (isinstance(entry, dict) and
+                            entry.get("role") in ("user", "assistant") and
+                            isinstance(entry.get("content"), str)):
+                            valid_context.append(entry)
+                        else:
+                            logger.warning(f"Filtering out invalid context entry: {entry}")
+                    context = valid_context if valid_context else None
+
+            return {"system_prompt": system_prompt, "context": context}
+        else:
+            logger.info("First message was not a config message, using defaults")
+            return {"system_prompt": None, "context": None}
+
+    except asyncio.TimeoutError:
+        logger.info("No config message received within timeout, using defaults")
+        return {"system_prompt": None, "context": None}
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in config message: {e}, using defaults")
+        return {"system_prompt": None, "context": None}
+    except Exception as e:
+        logger.warning(f"Error receiving config: {e}, using defaults")
+        return {"system_prompt": None, "context": None}
 
 
 @app.websocket("/ws")
@@ -117,8 +177,16 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for voice interaction."""
     await websocket.accept()
     logger.info("WebSocket connection accepted")
+
+    # Wait for optional config message
+    config = await receive_client_config(websocket, timeout=5.0)
+
     try:
-        await run_bot(websocket=websocket)
+        await run_bot(
+            websocket=websocket,
+            system_prompt=config.get("system_prompt"),
+            context_messages=config.get("context"),
+        )
     except WebSocketDisconnect:
         logger.info("Client disconnected")
     except Exception as e:
@@ -128,20 +196,14 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/voices")
 async def list_voices():
     """List available TTS voices."""
-    # Svara TTS voices
+    # Svara TTS voices (English, Hindi, Tamil, Kannada only)
     svara_voices = [
-        {"id": "hi_male", "name": "Hindi (Male)", "language": "Hindi", "provider": "svara"},
-        {"id": "hi_female", "name": "Hindi (Female)", "language": "Hindi", "provider": "svara"},
         {"id": "en_male", "name": "English (Male)", "language": "English", "provider": "svara"},
         {"id": "en_female", "name": "English (Female)", "language": "English", "provider": "svara"},
+        {"id": "hi_male", "name": "Hindi (Male)", "language": "Hindi", "provider": "svara"},
+        {"id": "hi_female", "name": "Hindi (Female)", "language": "Hindi", "provider": "svara"},
         {"id": "ta_male", "name": "Tamil (Male)", "language": "Tamil", "provider": "svara"},
         {"id": "ta_female", "name": "Tamil (Female)", "language": "Tamil", "provider": "svara"},
-        {"id": "te_male", "name": "Telugu (Male)", "language": "Telugu", "provider": "svara"},
-        {"id": "te_female", "name": "Telugu (Female)", "language": "Telugu", "provider": "svara"},
-        {"id": "bn_male", "name": "Bengali (Male)", "language": "Bengali", "provider": "svara"},
-        {"id": "bn_female", "name": "Bengali (Female)", "language": "Bengali", "provider": "svara"},
-        {"id": "mr_male", "name": "Marathi (Male)", "language": "Marathi", "provider": "svara"},
-        {"id": "mr_female", "name": "Marathi (Female)", "language": "Marathi", "provider": "svara"},
         {"id": "kn_male", "name": "Kannada (Male)", "language": "Kannada", "provider": "svara"},
         {"id": "kn_female", "name": "Kannada (Female)", "language": "Kannada", "provider": "svara"},
     ]
@@ -176,19 +238,10 @@ async def list_languages():
     """List supported STT languages."""
     languages = [
         {"code": "auto", "name": "Auto-detect"},
-        {"code": "hi", "name": "Hindi"},
         {"code": "en", "name": "English"},
+        {"code": "hi", "name": "Hindi"},
         {"code": "ta", "name": "Tamil"},
-        {"code": "te", "name": "Telugu"},
-        {"code": "bn", "name": "Bengali"},
-        {"code": "mr", "name": "Marathi"},
-        {"code": "gu", "name": "Gujarati"},
         {"code": "kn", "name": "Kannada"},
-        {"code": "ml", "name": "Malayalam"},
-        {"code": "pa", "name": "Punjabi"},
-        {"code": "ur", "name": "Urdu"},
-        {"code": "or", "name": "Odia"},
-        {"code": "as", "name": "Assamese"},
     ]
     return {"languages": languages}
 

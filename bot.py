@@ -25,7 +25,6 @@ import logging
 import os
 
 from pipecat.frames.frames import (
-    EndFrame,
     Frame,
     StartFrame,
     StartInterruptionFrame,
@@ -35,7 +34,6 @@ from pipecat.frames.frames import (
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
     TTSStoppedFrame,
-    TTSUpdateSettingsFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
@@ -195,8 +193,7 @@ class GreetingProcessor(FrameProcessor):
 
 
 # Environment configuration
-ASR_WS_URL = os.getenv("ASR_WS_URL", "ws://localhost:8082/v1/audio/speech-to-text/stream")
-TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://vllm-svara-tts/v1/audio/text-to-speech/stream")
+TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
@@ -208,14 +205,15 @@ SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", "")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")  # "elevenlabs" or "svara"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" or "male"
+TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")  # API key for Svara TTS auth
 
-# Voice configuration (for Svara TTS fallback)
-DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "hi_male")
+# Voice configuration (hardcoded)
+DEFAULT_VOICE = "en_female"  # Default voice for Svara TTS
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
 # Prompt configuration
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v3")
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v0")
 
 
 def load_system_prompt(version: str = PROMPT_VERSION) -> str:
@@ -229,8 +227,10 @@ def load_system_prompt(version: str = PROMPT_VERSION) -> str:
         return "You are a helpful voice assistant. Keep responses concise."
 
 
-# System prompt for the assistant - loaded from prompts/{version}.md
-SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT") or load_system_prompt()
+def get_default_system_prompt() -> str:
+    """Get default system prompt (v0.md)."""
+    return load_system_prompt(version="v0")
+
 
 # Greeting text spoken when connection is established
 GREETING_TEXT = os.getenv("GREETING_TEXT",
@@ -239,9 +239,7 @@ GREETING_TEXT = os.getenv("GREETING_TEXT",
 
 async def create_bot_pipeline(
     websocket,
-    sample_rate: int = 16000,
-    voice: str = DEFAULT_VOICE,
-    language: str = DEFAULT_LANGUAGE,
+    system_prompt: str = None,
     context_messages: list = None,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
@@ -249,14 +247,13 @@ async def create_bot_pipeline(
 
     Args:
         websocket: FastAPI WebSocket connection
-        sample_rate: Audio sample rate
-        voice: TTS voice ID
-        language: STT language code
+        system_prompt: Custom system prompt (defaults to prompts/v0.md)
+        context_messages: Prior conversation context
 
     Returns:
         Tuple of (PipelineTask, PipelineRunner, Transport)
     """
-    logger.info(f"Creating pipeline: language={language}, voice={DEFAULT_VOICE}, interim_results=False")
+    logger.info("Creating pipeline")
 
     # Create transport for WebSocket communication
     transport = FastAPIWebsocketTransport(
@@ -264,7 +261,7 @@ async def create_bot_pipeline(
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            audio_in_sample_rate=sample_rate,  # Input from client (16kHz)
+            audio_in_sample_rate=16000,  # Input from client (16kHz)
             audio_out_sample_rate=24000,
             add_wav_header=False,
             vad_analyzer=SileroVADAnalyzer(
@@ -286,9 +283,9 @@ async def create_bot_pipeline(
     logger.info("Using Soniox STT provider")
     stt = SonioxSTTService(
         api_key=SONIOX_API_KEY,
-        language_hints=["en", "hi", "ta", "te", "bn", "kn", "mr", "ml", "gu", "pa"],
+        language_hints=["en", "hi", "ta", "kn"],
         enable_speaker_diarization=True,
-        sample_rate=sample_rate,
+        sample_rate=16000,
     )
 
     # === TTS Service Selection ===
@@ -298,6 +295,7 @@ async def create_bot_pipeline(
             tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
             tts = SvaraTTSService(
                 base_url=tts_base_url,
+                api_key=TTS_WS_API_KEY,
                 voice=DEFAULT_VOICE,
                 streaming=True,
                 sample_rate=24000,
@@ -314,6 +312,7 @@ async def create_bot_pipeline(
         tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
         tts = SvaraTTSService(
             base_url=tts_base_url,
+            api_key=TTS_WS_API_KEY,
             voice=DEFAULT_VOICE,
             streaming=True,
             sample_rate=24000,
@@ -356,7 +355,8 @@ async def create_bot_pipeline(
 
     # === Modern LLM Context Setup ===
     # Build initial messages with system prompt and optional user-provided context
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
+    messages = [{"role": "system", "content": effective_prompt}]
     if context_messages:
         messages.extend(context_messages)
 
@@ -411,9 +411,7 @@ async def create_bot_pipeline(
 
 async def run_bot(
     websocket,
-    sample_rate: int = 16000,
-    voice: str = DEFAULT_VOICE,
-    language: str = DEFAULT_LANGUAGE,
+    system_prompt: str = None,
     context_messages: list = None,
 ):
     """
@@ -421,15 +419,12 @@ async def run_bot(
 
     Args:
         websocket: FastAPI WebSocket connection
-        sample_rate: Audio sample rate
-        voice: TTS voice ID
-        language: STT language code
+        system_prompt: Custom system prompt (defaults to prompts/v0.md)
+        context_messages: Prior conversation context
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
-        sample_rate=sample_rate,
-        voice=voice,
-        language=language,
+        system_prompt=system_prompt,
         context_messages=context_messages,
     )
 
