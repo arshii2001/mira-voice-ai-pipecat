@@ -1,0 +1,4 @@
+# Match pipecat-ai version from the main server
+pipecat-ai[websocket]==0.0.98
+websockets==14.0
+numpy==1.26.4

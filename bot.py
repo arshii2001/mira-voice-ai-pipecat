@@ -23,17 +23,25 @@ mid-speech. This works as follows:
 import asyncio
 import logging
 import os
+import time
 
 from pipecat.frames.frames import (
+    AudioRawFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     Frame,
     StartFrame,
     StartInterruptionFrame,
     TextFrame,
+    TTSSpeakFrame,
     TranscriptionFrame,
     InterimTranscriptionFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
+    TTSStartedFrame,
     TTSStoppedFrame,
+    LLMFullResponseStartFrame,
+    LLMFullResponseEndFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.pipeline.pipeline import Pipeline
@@ -111,57 +119,211 @@ SELECT_VOICE_SCHEMA = FunctionSchema(
 )
 
 
-class TranscriptLogger(FrameProcessor):
+class PipelineInstrumentor(FrameProcessor):
     """
-    Enhanced logging processor for debugging the voice pipeline.
-    Tracks conversation turns and logs all important frame events.
+    Comprehensive pipeline instrumentation for diagnosing voice quality.
+
+    Tracks end-to-end timing across every stage of the pipeline:
+      - VAD → STT latency (how fast speech is transcribed)
+      - STT → LLM latency (how fast the LLM starts responding)
+      - LLM → TTS latency (how fast TTS starts after first LLM token)
+      - TTS → Audio-out latency (time to first audible byte)
+      - Full turn latency (user stops speaking → first bot audio)
+      - LLM token cadence (inter-token timing for streaming smoothness)
+      - TTS chunk cadence (audio chunk delivery pattern)
+      - Barge-in metrics (interruption timing)
+
+    All timings use monotonic time.time() for accuracy.
+    Logs are prefixed with [METRICS] for easy grep/filtering.
     """
 
-    def __init__(self, name: str = "TranscriptLogger", **kwargs):
+    def __init__(self, name: str = "PipelineInstrumentor", **kwargs):
         super().__init__(name=name, **kwargs)
-        self._llm_buffer = ""  # Buffer to accumulate LLM text chunks
-        self._turn_count = 0   # Track conversation turns
+        self._turn_count = 0
+        self._llm_buffer = ""
+
+        # Per-turn timing anchors
+        self._user_started_speaking_at: float = 0.0
+        self._user_stopped_speaking_at: float = 0.0
+        self._stt_final_at: float = 0.0
+        self._llm_first_token_at: float = 0.0
+        self._llm_response_start_at: float = 0.0
+        self._llm_response_end_at: float = 0.0
+        self._tts_started_at: float = 0.0
+        self._tts_stopped_at: float = 0.0
+        self._bot_started_speaking_at: float = 0.0
+        self._bot_stopped_speaking_at: float = 0.0
+        self._first_audio_out_at: float = 0.0
+
+        # LLM streaming metrics
+        self._llm_token_count: int = 0
+        self._llm_token_times: list = []
+
+        # TTS audio metrics
+        self._tts_audio_chunks: int = 0
+        self._tts_audio_bytes: int = 0
+
+        # Barge-in tracking
+        self._barge_in_count: int = 0
+
+        # Session-level aggregates
+        self._turn_latencies: list = []
+
+    def _reset_turn(self):
+        """Reset per-turn counters for a new conversation turn."""
+        self._llm_buffer = ""
+        self._llm_token_count = 0
+        self._llm_token_times = []
+        self._tts_audio_chunks = 0
+        self._tts_audio_bytes = 0
+        self._llm_first_token_at = 0.0
+        self._llm_response_start_at = 0.0
+        self._llm_response_end_at = 0.0
+        self._tts_started_at = 0.0
+        self._tts_stopped_at = 0.0
+        self._bot_started_speaking_at = 0.0
+        self._bot_stopped_speaking_at = 0.0
+        self._first_audio_out_at = 0.0
+
+    def _ms(self, start: float, end: float) -> float:
+        """Convert time delta to milliseconds, return 0 if invalid."""
+        if start > 0 and end > 0 and end >= start:
+            return round((end - start) * 1000, 1)
+        return 0.0
+
+    def _log_turn_summary(self):
+        """Log a comprehensive summary of the completed turn."""
+        user_speech_ms = self._ms(self._user_started_speaking_at, self._user_stopped_speaking_at)
+        vad_to_stt_ms = self._ms(self._user_stopped_speaking_at, self._stt_final_at)
+        stt_to_llm_ms = self._ms(self._stt_final_at, self._llm_first_token_at)
+        llm_generation_ms = self._ms(self._llm_response_start_at, self._llm_response_end_at)
+        llm_to_tts_ms = self._ms(self._llm_first_token_at, self._tts_started_at)
+        tts_duration_ms = self._ms(self._tts_started_at, self._tts_stopped_at)
+        bot_speaking_ms = self._ms(self._bot_started_speaking_at, self._bot_stopped_speaking_at)
+        full_turn_latency_ms = self._ms(self._user_stopped_speaking_at, self._first_audio_out_at)
+
+        if full_turn_latency_ms > 0:
+            self._turn_latencies.append(full_turn_latency_ms)
+
+        avg_turn_latency = 0.0
+        if self._turn_latencies:
+            avg_turn_latency = round(sum(self._turn_latencies) / len(self._turn_latencies), 1)
+
+        logger.info(f"")
+        logger.info(f"{'─' * 70}")
+        logger.info(f"[METRICS] TURN {self._turn_count} SUMMARY")
+        logger.info(f"{'─' * 70}")
+        logger.info(f"[METRICS]   User speech duration:    {user_speech_ms:>8.1f} ms")
+        logger.info(f"[METRICS]   VAD→STT (transcribe):    {vad_to_stt_ms:>8.1f} ms")
+        logger.info(f"[METRICS]   STT→LLM (first token):   {stt_to_llm_ms:>8.1f} ms")
+        logger.info(f"[METRICS]   LLM generation total:     {llm_generation_ms:>8.1f} ms  ({self._llm_token_count} tokens)")
+        logger.info(f"[METRICS]   LLM→TTS (first chunk):    {llm_to_tts_ms:>8.1f} ms")
+        logger.info(f"[METRICS]   TTS duration:             {tts_duration_ms:>8.1f} ms  ({self._tts_audio_chunks} chunks, {self._tts_audio_bytes} bytes)")
+        logger.info(f"[METRICS]   Bot speaking duration:    {bot_speaking_ms:>8.1f} ms")
+        logger.info(f"[METRICS]   ★ FULL TURN LATENCY:      {full_turn_latency_ms:>8.1f} ms  (user-stop → first-audio)")
+        logger.info(f"[METRICS]   Session avg turn latency: {avg_turn_latency:>8.1f} ms  ({len(self._turn_latencies)} turns)")
+        logger.info(f"[METRICS]   Barge-ins this session:   {self._barge_in_count}")
+        logger.info(f"[METRICS]   Bot response: '{self._llm_buffer[:120]}{'...' if len(self._llm_buffer) > 120 else ''}'")
+        logger.info(f"{'─' * 70}")
+        logger.info(f"")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        now = time.time()
 
-        # Log STT transcriptions (final) - increment turn count
-        if isinstance(frame, TranscriptionFrame):
-            self._turn_count += 1
-            logger.info(f"[TURN {self._turn_count}] USER: '{frame.text}'")
-
-        # Log STT interim transcriptions
-        elif isinstance(frame, InterimTranscriptionFrame):
-            logger.debug(f"[STT INTERIM] '{frame.text}'")
-
-        # Log LLM text chunks (accumulate for full response)
-        elif isinstance(frame, TextFrame):
-            self._llm_buffer += frame.text
-            logger.debug(f"[LLM CHUNK] '{frame.text}'")
-
-        # Log when TTS finishes speaking - output full bot response
-        elif isinstance(frame, TTSStoppedFrame):
-            if self._llm_buffer:
-                logger.info(f"[TURN {self._turn_count}] BOT: '{self._llm_buffer}'")
-                self._llm_buffer = ""
-
-        # Log barge-in interruptions
-        elif isinstance(frame, StartInterruptionFrame):
-            logger.warning(f"[BARGE-IN] User interrupted bot speech")
-            self._llm_buffer = ""  # Clear partial response
-
-        # Log VAD events - VERY CLEAR markers for debugging
-        elif isinstance(frame, UserStartedSpeakingFrame):
+        # VAD: User started speaking
+        if isinstance(frame, UserStartedSpeakingFrame):
+            self._user_started_speaking_at = now
+            self._reset_turn()
             logger.info(f"")
-            logger.info(f"{'='*60}")
-            logger.info(f">>> VAD: USER STARTED SPEAKING <<<")
-            logger.info(f"{'='*60}")
+            logger.info(f"{'=' * 60}")
+            logger.info(f"[METRICS] >>> VAD: USER STARTED SPEAKING <<<  t={now:.3f}")
+            logger.info(f"{'=' * 60}")
 
+        # VAD: User stopped speaking
         elif isinstance(frame, UserStoppedSpeakingFrame):
-            logger.info(f"{'='*60}")
-            logger.info(f">>> VAD: USER STOPPED SPEAKING <<<")
-            logger.info(f"{'='*60}")
-            logger.info(f"")
+            self._user_stopped_speaking_at = now
+            speech_dur = self._ms(self._user_started_speaking_at, now)
+            logger.info(f"{'=' * 60}")
+            logger.info(f"[METRICS] >>> VAD: USER STOPPED SPEAKING <<<  duration={speech_dur:.0f}ms")
+            logger.info(f"{'=' * 60}")
+
+        # STT: Final transcription
+        elif isinstance(frame, TranscriptionFrame):
+            self._stt_final_at = now
+            self._turn_count += 1
+            stt_latency = self._ms(self._user_stopped_speaking_at, now)
+            logger.info(f"[METRICS] [TURN {self._turn_count}] STT FINAL: '{frame.text}'  (VAD→STT: {stt_latency:.0f}ms)")
+
+        # STT: Interim transcription
+        elif isinstance(frame, InterimTranscriptionFrame):
+            interim_latency = self._ms(self._user_started_speaking_at, now)
+            logger.debug(f"[METRICS] STT INTERIM: '{frame.text[:60]}...'  ({interim_latency:.0f}ms from speech start)")
+
+        # LLM: Response stream start
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            self._llm_response_start_at = now
+            logger.info(f"[METRICS] LLM response stream STARTED  (STT→LLM-start: {self._ms(self._stt_final_at, now):.0f}ms)")
+
+        # LLM: Text token
+        elif isinstance(frame, TextFrame):
+            self._llm_token_count += 1
+            self._llm_token_times.append(now)
+            self._llm_buffer += frame.text
+
+            if self._llm_token_count == 1:
+                self._llm_first_token_at = now
+                ttft = self._ms(self._user_stopped_speaking_at, now)
+                logger.info(f"[METRICS] LLM FIRST TOKEN: '{frame.text}'  (TTFT from user-stop: {ttft:.0f}ms)")
+
+        # LLM: Response stream end
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._llm_response_end_at = now
+            gen_ms = self._ms(self._llm_response_start_at, now)
+            tps = self._llm_token_count / (gen_ms / 1000) if gen_ms > 0 else 0
+            logger.info(f"[METRICS] LLM response COMPLETE: {self._llm_token_count} tokens in {gen_ms:.0f}ms ({tps:.1f} tok/s)")
+
+        # TTS: Started generating
+        elif isinstance(frame, TTSStartedFrame):
+            self._tts_started_at = now
+            llm_to_tts = self._ms(self._llm_first_token_at, now)
+            logger.info(f"[METRICS] TTS STARTED  (LLM-first-token → TTS-start: {llm_to_tts:.0f}ms)")
+
+        # TTS: Stopped generating
+        elif isinstance(frame, TTSStoppedFrame):
+            self._tts_stopped_at = now
+            tts_dur = self._ms(self._tts_started_at, now)
+            logger.info(f"[METRICS] TTS STOPPED  duration={tts_dur:.0f}ms  chunks={self._tts_audio_chunks}  bytes={self._tts_audio_bytes}")
+            self._log_turn_summary()
+
+        # Bot started speaking (audio out)
+        elif isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_started_speaking_at = now
+            full_latency = self._ms(self._user_stopped_speaking_at, now)
+            logger.info(f"[METRICS] BOT STARTED SPEAKING  (user-stop → bot-speak: {full_latency:.0f}ms)")
+
+        # Bot stopped speaking
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_stopped_speaking_at = now
+            speak_dur = self._ms(self._bot_started_speaking_at, now)
+            logger.info(f"[METRICS] BOT STOPPED SPEAKING  duration={speak_dur:.0f}ms")
+
+        # Audio output frame (for first-byte tracking)
+        elif isinstance(frame, AudioRawFrame):
+            self._tts_audio_chunks += 1
+            self._tts_audio_bytes += len(frame.audio) if hasattr(frame, 'audio') else 0
+
+            if self._tts_audio_chunks == 1:
+                self._first_audio_out_at = now
+                ttfb = self._ms(self._user_stopped_speaking_at, now)
+                logger.info(f"[METRICS] ★ FIRST AUDIO BYTE OUT  TTFB={ttfb:.0f}ms (user-stop → first-audio)")
+
+        # Barge-in
+        elif isinstance(frame, StartInterruptionFrame):
+            self._barge_in_count += 1
+            bot_interrupted_after = self._ms(self._bot_started_speaking_at, now)
+            logger.warning(f"[METRICS] ⚡ BARGE-IN #{self._barge_in_count}  (bot was speaking for {bot_interrupted_after:.0f}ms)")
+            self._llm_buffer = ""
 
         # Forward the frame downstream
         await self.push_frame(frame, direction)
@@ -170,7 +332,7 @@ class TranscriptLogger(FrameProcessor):
 class GreetingProcessor(FrameProcessor):
     """
     Processor that speaks a greeting when the pipeline starts.
-    Injects a TextFrame on StartFrame which flows to TTS for synthesis.
+    Injects a TTSSpeakFrame on StartFrame which flows to TTS for synthesis.
     """
 
     def __init__(self, greeting_text: str, name: str = "GreetingProcessor", **kwargs):
@@ -184,9 +346,14 @@ class GreetingProcessor(FrameProcessor):
         # On StartFrame, inject greeting text for TTS
         if isinstance(frame, StartFrame) and not self._greeting_spoken:
             self._greeting_spoken = True
+            # Push StartFrame FIRST so TTS initializes before receiving text
+            await self.push_frame(frame, direction)
+            # Short delay for ElevenLabs WebSocket handshake
+            await asyncio.sleep(0.3)
             logger.info(f"[GREETING] Speaking: '{self._greeting_text}'")
-            # Push TextFrame downstream - will flow to TTS for synthesis
-            await self.push_frame(TextFrame(text=self._greeting_text), FrameDirection.DOWNSTREAM)
+            # Use TTSSpeakFrame for immediate synthesis (bypasses text aggregator)
+            await self.push_frame(TTSSpeakFrame(text=self._greeting_text), FrameDirection.DOWNSTREAM)
+            return  # Don't push StartFrame again
 
         # Forward the original frame
         await self.push_frame(frame, direction)
@@ -211,9 +378,15 @@ TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")  # API key for Svara TTS auth
 DEFAULT_VOICE = "en_female"  # Default voice for Svara TTS
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
+# VAD params as env vars for tuning without code change
+VAD_CONFIDENCE = float(os.getenv("VAD_CONFIDENCE", "0.7"))
+VAD_START_SECS = float(os.getenv("VAD_START_SECS", "0.2"))
+VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.6"))
+VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.6"))
+
 # Prompt configuration
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v0")
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v3")
 
 
 def load_system_prompt(version: str = PROMPT_VERSION) -> str:
@@ -228,13 +401,14 @@ def load_system_prompt(version: str = PROMPT_VERSION) -> str:
 
 
 def get_default_system_prompt() -> str:
-    """Get default system prompt (v0.md)."""
-    return load_system_prompt(version="v0")
+    """Get default system prompt (uses PROMPT_VERSION env var, defaults to v3)."""
+    return load_system_prompt(version=PROMPT_VERSION)
 
 
 # Greeting text spoken when connection is established
+# NOTE: Single sentence avoids TTS splitting into multiple audio segments
 GREETING_TEXT = os.getenv("GREETING_TEXT",
-    "Hi, I'm Mira! I can chat with you in any language - just speak naturally. How can I help you today?")
+    "Namaste! I'm Mira, your study buddy. I speak English, Hindi, Tamil, and Kannada. Ask me anything!")
 
 
 async def create_bot_pipeline(
@@ -266,10 +440,10 @@ async def create_bot_pipeline(
             add_wav_header=False,
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
-                    confidence=0.7, # Confidence threshold for speech detection. Higher values make detection more strict. Must be between 0 and 1.
-                    start_secs=0.2, # Time in seconds that speech must be detected before transitioning to SPEAKING state.
-                    stop_secs=0.6, # Time in seconds of silence required before transitioning back to QUIET state.
-                    min_volume=0.6, # Minimum audio volume threshold for speech detection. Must be between 0 and 1.
+                    confidence=VAD_CONFIDENCE,
+                    start_secs=VAD_START_SECS,
+                    stop_secs=VAD_STOP_SECS,
+                    min_volume=VAD_MIN_VOLUME,
                 )
             ),
             serializer=ProtobufFrameSerializer(),
@@ -357,6 +531,9 @@ async def create_bot_pipeline(
     # Build initial messages with system prompt and optional user-provided context
     effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
     messages = [{"role": "system", "content": effective_prompt}]
+    # Pre-seed the greeting as an assistant message so the LLM knows it was spoken,
+    # even if the greeting audio gets interrupted by the user speaking early.
+    messages.append({"role": "assistant", "content": GREETING_TEXT})
     if context_messages:
         messages.extend(context_messages)
 
@@ -371,8 +548,8 @@ async def create_bot_pipeline(
     user_aggregator = aggregator_pair.user()
     assistant_aggregator = aggregator_pair.assistant()
 
-    # Create transcript logger to capture LLM responses and STT transcripts
-    transcript_logger = TranscriptLogger(name="PipelineLogger")
+    # Create pipeline instrumentor for comprehensive timing diagnostics
+    transcript_logger = PipelineInstrumentor(name="PipelineInstrumentor")
 
     # Create greeting processor to speak welcome message on connection
     greeting_processor = GreetingProcessor(

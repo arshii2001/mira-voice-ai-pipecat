@@ -22,12 +22,37 @@ Server protocol:
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List
 
 import numpy as np
 import websockets
 from websockets.asyncio.client import connect as websocket_connect
+
+
+def detect_language_from_script(text: str) -> Optional[str]:
+    """Detect language from Unicode script of the text (fallback when STT doesn't report language).
+
+    Strips speaker labels and ASCII before checking the dominant non-Latin script.
+    """
+    # Remove speaker labels like "Speaker 1: "
+    cleaned = re.sub(r"Speaker\s+\d+:\s*", "", text)
+    # Remove ASCII / Latin characters and punctuation — only look at non-Latin chars
+    non_latin = re.sub(r"[\x00-\x7F]", "", cleaned)
+    if not non_latin:
+        return "en"  # All ASCII → English
+
+    # Count characters by Unicode block
+    devanagari = sum(1 for c in non_latin if "\u0900" <= c <= "\u097F")
+    tamil = sum(1 for c in non_latin if "\u0B80" <= c <= "\u0BFF")
+    kannada = sum(1 for c in non_latin if "\u0C80" <= c <= "\u0CFF")
+
+    counts = {"hi": devanagari, "ta": tamil, "kn": kannada}
+    best = max(counts, key=counts.get)
+    if counts[best] > 0:
+        return best
+    return None  # Unknown script
 
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
@@ -151,10 +176,12 @@ class SonioxSTTService(FrameProcessor):
         self._keepalive_task: Optional[asyncio.Task] = None
 
     async def start(self, frame: StartFrame):
-        """Start the STT service. Connection is lazy - established when user speaks."""
-        # Don't connect here - wait for user to start speaking
-        # This prevents Soniox from timing out idle connections
-        logger.info("Soniox STT service started (lazy connection mode)")
+        """Start the STT service. Connect eagerly for lower first-turn latency."""
+        logger.info("Soniox STT service started (eager connection mode)")
+        try:
+            await self._connect()
+        except Exception as e:
+            logger.warning(f"Eager Soniox connect failed, will retry on first speech: {e}")
 
     async def stop(self, frame: EndFrame):
         """Stop the STT service and close connection."""
@@ -328,6 +355,11 @@ class SonioxSTTService(FrameProcessor):
             if "speaker" in token and self._config.enable_speaker_diarization:
                 speaker = token["speaker"]
 
+            # Track detected language if language identification is enabled
+            if "language" in token and self._config.enable_language_identification:
+                self._detected_language = token["language"]
+                logger.debug(f"Soniox detected language: {self._detected_language}")
+
         text = "".join(text_parts).strip()  # No space - tokens may include spaces
         # Remove Soniox end token
         text = text.replace("<end>", "").strip()
@@ -343,16 +375,24 @@ class SonioxSTTService(FrameProcessor):
         # Check fin_audio_proc (final audio processed) or is_final flag
         if data.get("fin_audio_proc", False) or is_final:
             if not self._muted:
-                logger.info(f"Soniox final: {formatted_text}")
+                logger.info(f"Soniox final [{self._detected_language or '?'}]: {formatted_text}")
                 self._interrupted = False
                 self._current_text = ""
 
+                # Detect language: prefer Soniox's language field, fallback to script detection
+                lang = self._detected_language
+                if not lang:
+                    lang = detect_language_from_script(formatted_text) or "en"
+                    logger.info(f"Language detected from script: {lang}")
+                lang_label = {"en": "English", "hi": "Hindi", "ta": "Tamil", "kn": "Kannada"}.get(lang, lang)
+                tagged_text = f"[User is speaking {lang_label}] {formatted_text}"
+
                 await self.push_frame(
                     TranscriptionFrame(
-                        text=formatted_text,
+                        text=tagged_text,
                         user_id="",
                         timestamp="",
-                        language=self._detected_language or "en",
+                        language=lang,
                     )
                 )
         elif not self._muted and self._config.include_nonfinal:

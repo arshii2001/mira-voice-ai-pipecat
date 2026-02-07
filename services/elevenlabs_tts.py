@@ -74,12 +74,27 @@ def create_elevenlabs_tts(
 
     logger.info(f"Creating ElevenLabs TTS: voice={voice_name} ({selected_voice_id}), model={model}")
 
+    # Voice settings to prevent high-pitch first syllable and ensure consistent prosody.
+    # - stability=0.6: Higher stability = more consistent pitch across chunks (reduces first-syllable spike)
+    # - similarity_boost=0.8: Keep voice close to the original voice profile
+    # - style=0.0: Disable style exaggeration which can cause pitch variation
+    # - use_speaker_boost=True: Clearer voice output
+    params = ElevenLabsTTSService.InputParams(
+        stability=0.75,
+        similarity_boost=0.85,
+        style=0.0,
+        use_speaker_boost=True,
+    )
+
+    logger.info(f"ElevenLabs voice params: stability={params.stability}, similarity={params.similarity_boost}, style={params.style}")
+
     # Create and return the service
     return ElevenLabsTTSService(
         api_key=api_key,
         voice_id=selected_voice_id,
         model=model,
         sample_rate=sample_rate,
+        params=params,
         **kwargs
     )
 

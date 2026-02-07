@@ -179,7 +179,7 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection accepted")
 
     # Wait for optional config message
-    config = await receive_client_config(websocket, timeout=5.0)
+    config = await receive_client_config(websocket, timeout=1.0)
 
     try:
         await run_bot(

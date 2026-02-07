@@ -1,0 +1,111 @@
+# ============================================
+# MiraVoiceAI Local Testing Stack
+# ============================================
+# 
+# Usage:
+#   1. Copy env.example to .env and add your API keys
+#   2. docker compose up --build
+#   3. Open http://localhost:3000
+#   4. Enable Pipecat in Admin Settings > Audio
+#   5. Start a chat and click the call button
+#
+# ============================================
+
+services:
+  # ============================================
+  # Pipecat Voice Backend
+  # STT (Soniox) -> LLM (OpenAI) -> TTS (ElevenLabs)
+  # ============================================
+  mira-voice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mira-voice
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=7860
+    volumes:
+      - ./prompts:/app/prompts:ro
+    networks:
+      - mira-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================
+  # OpenWebUI Frontend (with Pipecat support)
+  # Using local build from mira_openwebui
+  # ============================================
+  open-webui:
+    build:
+      context: ../mira_openwebui
+      dockerfile: Dockerfile
+      args:
+        - USE_SLIM=true  # Skip downloading large ML models for faster build
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      # Pipecat Voice Integration
+      - PIPECAT_ENABLED=true
+      - PIPECAT_API_URL=http://mira-voice:7860
+      - PIPECAT_CONNECTION_MODE=websocket
+      
+      # Disable auth for local testing
+      - WEBUI_AUTH=false
+      - ENABLE_SIGNUP=true
+      
+      # Use OpenAI for text chat
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE_URL=https://api.openai.com/v1
+      
+      # Ollama (if running locally)
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      
+    volumes:
+      - open-webui-data:/app/backend/data
+    networks:
+      - mira-network
+    depends_on:
+      mira-voice:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ============================================
+  # Automated Voice Pipeline Test Client
+  # Speaks RTVI/Protobuf protocol to mira-voice
+  # ============================================
+  # Run with: docker compose run --rm test-voice
+  # Or:       docker compose run --rm test-voice --test greeting
+  # Or:       docker compose run --rm test-voice --test bargein --verbose
+  test-voice:
+    build:
+      context: ./tests
+      dockerfile: Dockerfile
+    container_name: mira-test-voice
+    environment:
+      - PIPECAT_WS_URL=ws://mira-voice:7860/ws
+    networks:
+      - mira-network
+    depends_on:
+      mira-voice:
+        condition: service_healthy
+    profiles:
+      - test  # Only runs when explicitly requested
+
+networks:
+  mira-network:
+    driver: bridge
+
+volumes:
+  open-webui-data:
