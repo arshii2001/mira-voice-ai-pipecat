@@ -78,14 +78,16 @@ logger = logging.getLogger(__name__)
 
 
 class VoiceStateManager:
-    """Manages the current voice state for voice switching functionality."""
+    """Manages the current voice state for voice switching functionality.
 
-    VOICE_IDS = {
-        "female": "2zRM7PkgwBPiau2jvVXc",  # Monika Sogam
-        "male": "siw1N9V8LmYeEWKyWBxv",    # Ruhaan
-    }
+    Voice IDs are loaded from the ElevenLabs VOICE_PRESETS (services/elevenlabs_tts.py)
+    so there is a single source of truth. If the presets are updated, voice switching
+    picks up the change automatically.
+    """
 
     def __init__(self, initial_gender: str = "female"):
+        from services.elevenlabs_tts import VOICE_PRESETS
+        self._voice_ids = {g: p["id"] for g, p in VOICE_PRESETS.items()}
         self._current_gender = initial_gender
 
     @property
@@ -94,13 +96,13 @@ class VoiceStateManager:
 
     @property
     def current_voice_id(self) -> str:
-        return self.VOICE_IDS[self._current_gender]
+        return self._voice_ids.get(self._current_gender, self._voice_ids.get("female"))
 
     def switch_voice(self, mode: str) -> tuple[str, str]:
         """Switch voice based on mode. Returns (new_gender, new_voice_id)."""
         if mode == "switch":
             self._current_gender = "male" if self._current_gender == "female" else "female"
-        elif mode in ("male", "female"):
+        elif mode in self._voice_ids:
             self._current_gender = mode
         return self._current_gender, self.current_voice_id
 
@@ -329,6 +331,86 @@ class PipelineInstrumentor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class TextStreamForwarder(FrameProcessor):
+    """
+    Sends LLM text to the client as JSON messages for real-time text rendering.
+
+    Used in BOTH modes:
+      - text_and_audio: client gets text + audio simultaneously (text for rendering,
+        audio for playback). Frames still flow downstream to TTS.
+      - text_only: client gets text only; TTSSpeakFrames are consumed here
+        (no TTS downstream to process them).
+
+    JSON messages sent:
+      - {"type": "bot_text", "text": "chunk", "streaming": true}  — per LLM token
+      - {"type": "bot_text_complete", "text": "full response"}     — end of response
+    """
+
+    def __init__(self, websocket, text_only: bool = False, name: str = "TextStreamForwarder", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self._websocket = websocket
+        self._text_only = text_only
+        self._current_response = ""
+        self._in_response = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._in_response = True
+            self._current_response = ""
+            await self.push_frame(frame, direction)
+
+        elif isinstance(frame, TTSSpeakFrame):
+            # Greeting / direct-speak frames — send as text
+            try:
+                await self._websocket.send_json({
+                    "type": "bot_text_complete",
+                    "text": frame.text,
+                })
+                logger.info(f"[TEXT_STREAM] Greeting text sent: '{frame.text[:120]}'")
+            except Exception as e:
+                logger.debug(f"[TEXT_STREAM] Failed to send greeting text: {e}")
+
+            if self._text_only:
+                # No TTS downstream — consume the frame
+                return
+            # In text_and_audio mode, push downstream so TTS synthesizes it
+            await self.push_frame(frame, direction)
+
+        elif isinstance(frame, TextFrame) and self._in_response:
+            self._current_response += frame.text
+            # Stream each token to client for real-time text rendering
+            try:
+                await self._websocket.send_json({
+                    "type": "bot_text",
+                    "text": frame.text,
+                    "streaming": True,
+                })
+            except Exception as e:
+                logger.debug(f"[TEXT_STREAM] Failed to send text chunk: {e}")
+            # Always push downstream (to TTS in audio mode, or to assistant aggregator)
+            await self.push_frame(frame, direction)
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._in_response = False
+            # Send complete response for client to finalize display
+            try:
+                await self._websocket.send_json({
+                    "type": "bot_text_complete",
+                    "text": self._current_response,
+                })
+                logger.info(f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'")
+            except Exception as e:
+                logger.debug(f"[TEXT_STREAM] Failed to send complete text: {e}")
+            self._current_response = ""
+            await self.push_frame(frame, direction)
+
+        else:
+            # Forward everything else unchanged
+            await self.push_frame(frame, direction)
+
+
 class GreetingProcessor(FrameProcessor):
     """
     Processor that speaks a greeting when the pipeline starts.
@@ -359,23 +441,35 @@ class GreetingProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-# Environment configuration
-TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
+# ─────────────────────────────────────────────────────────────────────
+# Environment configuration — ALL provider settings are env-var driven.
+# Change provider by setting the env var; no code changes needed.
+# ─────────────────────────────────────────────────────────────────────
+
+# --- LLM ---
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")       # "openai" (or any OpenAI-compatible)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
 
-# STT configuration (Soniox)
+# --- STT ---
+STT_PROVIDER = os.getenv("STT_PROVIDER", "soniox")       # "soniox" | "deepgram" | "whisper"
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", "")
+DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+STT_LANGUAGE_HINTS = os.getenv("STT_LANGUAGE_HINTS", "en,hi,ta,kn")  # Comma-separated
+STT_SAMPLE_RATE = int(os.getenv("STT_SAMPLE_RATE", "16000"))
 
-# TTS Provider configuration
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")  # "elevenlabs" or "svara"
+# --- TTS ---
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")    # "elevenlabs" | "svara" | "openai"
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" or "male"
-TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")  # API key for Svara TTS auth
+TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" | "male"
+TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
+TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")          # API key for Svara TTS auth
+TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova")  # For OpenAI TTS provider
 
-# Voice configuration (hardcoded)
-DEFAULT_VOICE = "en_female"  # Default voice for Svara TTS
+# --- Voice ---
+DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "en_female")   # Default voice for Svara TTS
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
 # VAD params as env vars for tuning without code change
@@ -411,10 +505,142 @@ GREETING_TEXT = os.getenv("GREETING_TEXT",
     "Namaste! I'm Mira, your study buddy. I speak English, Hindi, Tamil, and Kannada. Ask me anything!")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Provider factories — swap provider via env var, no code changes.
+# ─────────────────────────────────────────────────────────────────────
+
+def create_stt_service(sample_rate: int = None):
+    """
+    Create an STT service based on STT_PROVIDER env var.
+
+    Supported providers:
+      - "soniox" (default) — custom SonioxSTTService with language detection
+      - "deepgram"         — Pipecat built-in DeepgramSTTService
+      - "whisper"          — Pipecat built-in WhisperSTTService (local)
+
+    Returns a FrameProcessor that emits TranscriptionFrame/InterimTranscriptionFrame.
+    """
+    provider = STT_PROVIDER.lower()
+    sr = sample_rate or STT_SAMPLE_RATE
+    lang_hints = [h.strip() for h in STT_LANGUAGE_HINTS.split(",") if h.strip()]
+
+    if provider == "soniox":
+        if not SONIOX_API_KEY:
+            raise ValueError("SONIOX_API_KEY is required when STT_PROVIDER=soniox")
+        logger.info(f"Creating STT service: Soniox (languages={lang_hints})")
+        return SonioxSTTService(
+            api_key=SONIOX_API_KEY,
+            language_hints=lang_hints,
+            enable_speaker_diarization=True,
+            sample_rate=sr,
+        )
+
+    elif provider == "deepgram":
+        if not DEEPGRAM_API_KEY:
+            raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
+        from pipecat.services.deepgram.stt import DeepgramSTTService
+        logger.info(f"Creating STT service: Deepgram (language={lang_hints[0] if lang_hints else 'en'})")
+        return DeepgramSTTService(
+            api_key=DEEPGRAM_API_KEY,
+            sample_rate=sr,
+        )
+
+    elif provider == "whisper":
+        from pipecat.services.whisper.stt import WhisperSTTService
+        logger.info("Creating STT service: Whisper (local)")
+        return WhisperSTTService()
+
+    else:
+        raise ValueError(
+            f"Unknown STT_PROVIDER: '{provider}'. "
+            f"Supported: soniox, deepgram, whisper"
+        )
+
+
+def create_tts_service(sample_rate: int = None):
+    """
+    Create a TTS service based on TTS_PROVIDER env var.
+
+    Supported providers:
+      - "elevenlabs" (default) — ElevenLabs multilingual TTS
+      - "svara"                — Custom Svara TTS
+      - "openai"               — OpenAI TTS (tts-1 / tts-1-hd)
+
+    Returns a TTSService (or compatible FrameProcessor).
+    """
+    provider = TTS_PROVIDER.lower()
+    sr = sample_rate or TTS_SAMPLE_RATE
+
+    if provider == "elevenlabs" and ELEVENLABS_API_KEY:
+        logger.info(f"Creating TTS service: ElevenLabs (voice_gender={TTS_VOICE_GENDER})")
+        return create_elevenlabs_tts(
+            api_key=ELEVENLABS_API_KEY,
+            voice_gender=TTS_VOICE_GENDER,
+            sample_rate=sr,
+        )
+
+    elif provider == "svara":
+        logger.info("Creating TTS service: Svara")
+        tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
+        return SvaraTTSService(
+            base_url=tts_base_url,
+            api_key=TTS_WS_API_KEY,
+            voice=DEFAULT_VOICE,
+            streaming=True,
+            sample_rate=sr,
+        )
+
+    elif provider == "openai":
+        from pipecat.services.openai.tts import OpenAITTSService
+        logger.info(f"Creating TTS service: OpenAI (voice={OPENAI_TTS_VOICE})")
+        return OpenAITTSService(
+            api_key=LLM_API_KEY,
+            voice=OPENAI_TTS_VOICE,
+            sample_rate=sr,
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown TTS_PROVIDER: '{provider}'. "
+            f"Supported: elevenlabs, svara, openai"
+        )
+
+
+def create_llm_service():
+    """
+    Create an LLM service based on LLM_PROVIDER env var.
+
+    Supported providers:
+      - "openai" (default) — OpenAI-compatible (works with vLLM, Azure, etc.)
+
+    Any provider that exposes an OpenAI-compatible /v1/chat/completions
+    endpoint works by setting LLM_BASE_URL and LLM_API_KEY.
+
+    Returns an LLM service with a chat completions interface.
+    """
+    provider = LLM_PROVIDER.lower()
+
+    if provider == "openai":
+        logger.info(f"Creating LLM service: OpenAI-compatible (model={LLM_MODEL}, base_url={LLM_BASE_URL})")
+        return OpenAILLMService(
+            api_key=LLM_API_KEY,
+            base_url=LLM_BASE_URL,
+            model=LLM_MODEL,
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown LLM_PROVIDER: '{provider}'. "
+            f"Supported: openai (covers vLLM, Azure, OpenRouter, etc.)"
+        )
+
+
 async def create_bot_pipeline(
     websocket,
     system_prompt: str = None,
     context_messages: list = None,
+    mode: str = "text_and_audio",
+    extra_processors: list = None,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
@@ -423,18 +649,23 @@ async def create_bot_pipeline(
         websocket: FastAPI WebSocket connection
         system_prompt: Custom system prompt (defaults to prompts/v0.md)
         context_messages: Prior conversation context
+        mode: "text_and_audio" (default) or "text_only" — when text_only, TTS
+              is skipped entirely and LLM text is forwarded to the client as JSON.
+        extra_processors: Optional list of FrameProcessors to insert into the pipeline
+              after instrumentation (e.g., classroom broadcaster taps).
 
     Returns:
         Tuple of (PipelineTask, PipelineRunner, Transport)
     """
-    logger.info("Creating pipeline")
+    text_only = mode == "text_only"
+    logger.info(f"Creating pipeline (mode={mode})")
 
     # Create transport for WebSocket communication
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
         params=FastAPIWebsocketParams(
             audio_in_enabled=True,
-            audio_out_enabled=True,
+            audio_out_enabled=not text_only,  # Disable audio output for text_only
             audio_in_sample_rate=16000,  # Input from client (16kHz)
             audio_out_sample_rate=24000,
             add_wav_header=False,
@@ -450,82 +681,43 @@ async def create_bot_pipeline(
         ),
     )
 
-    # === STT Service (Soniox only) ===
-    if not SONIOX_API_KEY:
-        raise ValueError("SONIOX_API_KEY environment variable is required")
+    # === STT Service (provider-agnostic factory) ===
+    stt = create_stt_service(sample_rate=STT_SAMPLE_RATE)
 
-    logger.info("Using Soniox STT provider")
-    stt = SonioxSTTService(
-        api_key=SONIOX_API_KEY,
-        language_hints=["en", "hi", "ta", "kn"],
-        enable_speaker_diarization=True,
-        sample_rate=16000,
-    )
-
-    # === TTS Service Selection ===
-    if TTS_PROVIDER == "elevenlabs":
-        if not ELEVENLABS_API_KEY:
-            logger.warning("ELEVENLABS_API_KEY not set, falling back to Svara TTS")
-            tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
-            tts = SvaraTTSService(
-                base_url=tts_base_url,
-                api_key=TTS_WS_API_KEY,
-                voice=DEFAULT_VOICE,
-                streaming=True,
-                sample_rate=24000,
-            )
-        else:
-            logger.info(f"Using ElevenLabs TTS provider (voice_gender={TTS_VOICE_GENDER})")
-            tts = create_elevenlabs_tts(
-                api_key=ELEVENLABS_API_KEY,
-                voice_gender=TTS_VOICE_GENDER,
-                sample_rate=24000,
-            )
-    else:
-        logger.info("Using Svara TTS provider")
-        tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
-        tts = SvaraTTSService(
-            base_url=tts_base_url,
-            api_key=TTS_WS_API_KEY,
-            voice=DEFAULT_VOICE,
-            streaming=True,
-            sample_rate=24000,
-        )
+    # === TTS Service (provider-agnostic factory) — skipped in text_only mode ===
+    tts = None if text_only else create_tts_service(sample_rate=TTS_SAMPLE_RATE)
 
     # Voice state manager for runtime voice switching
     voice_state = VoiceStateManager(initial_gender=TTS_VOICE_GENDER)
 
-    # Initialize LLM service
-    llm = OpenAILLMService(
-        api_key=LLM_API_KEY,
-        base_url=LLM_BASE_URL,
-        model=LLM_MODEL,
-    )
+    # === LLM Service (provider-agnostic factory) ===
+    llm = create_llm_service()
 
-    # === Register Function Handler for Voice Switching ===
-    async def handle_select_voice(params: FunctionCallParams):
-        """Handle voice switching function call from LLM."""
-        mode = params.arguments.get("mode", "switch")
-        new_gender, new_voice_id = voice_state.switch_voice(mode)
+    # === Register Function Handler for Voice Switching (only when TTS is active) ===
+    from openai import NOT_GIVEN
+    tools = NOT_GIVEN
+    if tts is not None:
+        async def handle_select_voice(params: FunctionCallParams):
+            """Handle voice switching function call from LLM."""
+            switch_mode = params.arguments.get("mode", "switch")
+            new_gender, new_voice_id = voice_state.switch_voice(switch_mode)
 
-        # Directly update the TTS voice and force reconnection
-        tts._voice_id = new_voice_id
-        await tts._disconnect()
-        await tts._connect()
+            # Directly update the TTS voice and force reconnection
+            tts._voice_id = new_voice_id
+            await tts._disconnect()
+            await tts._connect()
 
-        logger.info(f"[VOICE SWITCH] Mode: {mode}, New voice: {new_gender} ({new_voice_id})")
+            logger.info(f"[VOICE SWITCH] Mode: {switch_mode}, New voice: {new_gender} ({new_voice_id})")
 
-        # Return result to LLM so it can acknowledge the change
-        await params.result_callback({
-            "success": True,
-            "new_voice": new_gender,
-            "message": f"Voice switched to {new_gender}"
-        })
+            # Return result to LLM so it can acknowledge the change
+            await params.result_callback({
+                "success": True,
+                "new_voice": new_gender,
+                "message": f"Voice switched to {new_gender}"
+            })
 
-    llm.register_function("select_voice", handle_select_voice)
-
-    # === Tools Schema for Function Calling ===
-    tools = ToolsSchema(standard_tools=[SELECT_VOICE_SCHEMA])
+        llm.register_function("select_voice", handle_select_voice)
+        tools = ToolsSchema(standard_tools=[SELECT_VOICE_SCHEMA])
 
     # === Modern LLM Context Setup ===
     # Build initial messages with system prompt and optional user-provided context
@@ -557,19 +749,46 @@ async def create_bot_pipeline(
         name="GreetingProcessor",
     )
 
-    # Build pipeline with greeting support
-    # Flow: input -> STT -> user_aggregator -> LLM -> logger -> greeting -> TTS -> output -> assistant_aggregator
-    pipeline = Pipeline([
-        transport.input(),          # 1. Receive audio from client
-        stt,                        # 2. Speech-to-text (IndicASR, finalize-only mode)
-        user_aggregator,            # 3. Collect user messages and trigger LLM
-        llm,                        # 4. Language model (GPT-OSS, responds in English)
-        transcript_logger,          # 5. Log conversation turns
-        greeting_processor,         # 6. Inject greeting on StartFrame
-        tts,                        # 7. Text-to-speech (Svara, hi_male voice)
-        transport.output(),         # 8. Send audio to client
-        assistant_aggregator,       # 9. Collect assistant responses for context
-    ])
+    # TextStreamForwarder sends LLM text as JSON to client in BOTH modes
+    text_forwarder = TextStreamForwarder(
+        websocket=websocket,
+        text_only=text_only,
+        name="TextStreamForwarder",
+    )
+
+    # Build pipeline
+    extra_processors = extra_processors or []
+    if text_only:
+        logger.info("[PIPELINE] text_only mode: TTS skipped, text streamed via JSON")
+        # Flow: input -> STT -> aggregator -> LLM -> logger -> greeting -> text_forwarder -> output -> assistant_aggregator
+        pipeline = Pipeline([
+            transport.input(),          # 1. Receive audio from client
+            stt,                        # 2. Speech-to-text
+            user_aggregator,            # 3. Collect user messages and trigger LLM
+            llm,                        # 4. Language model
+            transcript_logger,          # 5. Log conversation turns
+            *extra_processors,          # 6. Optional taps (e.g., classroom)
+            greeting_processor,         # 6. Inject greeting on StartFrame
+            text_forwarder,             # 7. Stream text as JSON (TTS skipped)
+            transport.output(),         # 8. Transport (audio-in still works)
+            assistant_aggregator,       # 9. Collect assistant responses for context
+        ])
+    else:
+        logger.info("[PIPELINE] text_and_audio mode: text streamed + TTS audio")
+        # Flow: input -> STT -> aggregator -> LLM -> logger -> greeting -> text_forwarder -> TTS -> output -> assistant_aggregator
+        pipeline = Pipeline([
+            transport.input(),          # 1. Receive audio from client
+            stt,                        # 2. Speech-to-text
+            user_aggregator,            # 3. Collect user messages and trigger LLM
+            llm,                        # 4. Language model
+            transcript_logger,          # 5. Log conversation turns
+            *extra_processors,          # 6. Optional taps (e.g., classroom)
+            greeting_processor,         # 6. Inject greeting on StartFrame
+            text_forwarder,             # 7. Stream text as JSON to client
+            tts,                        # 8. Text-to-speech (audio)
+            transport.output(),         # 9. Send audio to client
+            assistant_aggregator,       # 10. Collect assistant responses for context
+        ])
 
     # Create task and runner
     task = PipelineTask(
@@ -590,6 +809,8 @@ async def run_bot(
     websocket,
     system_prompt: str = None,
     context_messages: list = None,
+    mode: str = "text_and_audio",
+    extra_processors: list = None,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -598,11 +819,14 @@ async def run_bot(
         websocket: FastAPI WebSocket connection
         system_prompt: Custom system prompt (defaults to prompts/v0.md)
         context_messages: Prior conversation context
+        mode: "text_and_audio" (default) or "text_only"
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
         system_prompt=system_prompt,
         context_messages=context_messages,
+        mode=mode,
+        extra_processors=extra_processors,
     )
 
     # Add transport event handlers for proper RTVI protocol support

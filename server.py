@@ -24,15 +24,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from bot import (
     run_bot,
     DEFAULT_LANGUAGE,
+    DEFAULT_VOICE,
     TTS_WS_URL,
+    LLM_PROVIDER,
     LLM_BASE_URL,
     LLM_MODEL,
+    STT_PROVIDER,
     SONIOX_API_KEY,
+    DEEPGRAM_API_KEY,
+    STT_LANGUAGE_HINTS,
     TTS_PROVIDER,
     ELEVENLABS_API_KEY,
     TTS_VOICE_GENDER,
 )
 from services.elevenlabs_tts import VOICE_PRESETS
+from classroom import router as classroom_router, room_manager, ClassroomBroadcaster
 
 # Configure logging
 logging.basicConfig(
@@ -72,6 +78,10 @@ app.add_middleware(
 )
 
 
+# Register classroom mode routes (additive — does not touch /ws)
+app.include_router(classroom_router)
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
@@ -94,19 +104,29 @@ async def connect():
 
 @app.get("/config")
 async def get_config():
-    """Get current server configuration."""
+    """Get current server configuration — all values come from env vars."""
+    lang_hints = [h.strip() for h in STT_LANGUAGE_HINTS.split(",") if h.strip()]
     return {
-        "stt_provider": "soniox",
-        "soniox_api_key_set": bool(SONIOX_API_KEY),
+        # STT
+        "stt_provider": STT_PROVIDER,
+        "stt_api_key_set": bool(SONIOX_API_KEY or DEEPGRAM_API_KEY),
+        "supported_stt_providers": ["soniox", "deepgram", "whisper"],
+        # TTS
         "tts_provider": TTS_PROVIDER,
         "tts_ws_url": TTS_WS_URL,
         "elevenlabs_api_key_set": bool(ELEVENLABS_API_KEY),
         "tts_voice_gender": TTS_VOICE_GENDER,
+        "supported_tts_providers": ["elevenlabs", "svara", "openai"],
+        # LLM
+        "llm_provider": LLM_PROVIDER,
         "llm_base_url": LLM_BASE_URL,
         "llm_model": LLM_MODEL,
-        "default_voice": "en_female",  # Hardcoded default
+        "supported_llm_providers": ["openai"],
+        # General
+        "default_voice": DEFAULT_VOICE,
         "default_language": DEFAULT_LANGUAGE,
-        "supported_languages": ["en", "hi", "ta", "kn"],
+        "supported_languages": lang_hints,
+        "supported_modes": ["text_and_audio", "text_only"],
     }
 
 
@@ -119,9 +139,14 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
         "type": "config",
         "system_prompt": "...",  // optional
         "context": [...]        // optional
+        "mode": "text_and_audio", // optional: "text_and_audio" (default) or "text_only"
+        "room_id": "...",         // optional: classroom room to broadcast to
+        "speaker_id": "...",      // optional: classroom speaker user_id
+        "speaker_name": "...",    // optional: classroom speaker name
+        "speaker_language": "en"  // optional: classroom speaker language
     }
 
-    Returns dict with system_prompt and context (may be None).
+    Returns dict with system_prompt, context, mode, and optional classroom fields.
     """
     try:
         # Wait for a message with timeout
@@ -156,20 +181,72 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                             logger.warning(f"Filtering out invalid context entry: {entry}")
                     context = valid_context if valid_context else None
 
-            return {"system_prompt": system_prompt, "context": context}
+            # Extract and validate mode
+            mode = data.get("mode", "text_and_audio")
+            if mode not in ("text_and_audio", "text_only"):
+                logger.warning(f"Invalid mode '{mode}', defaulting to text_and_audio")
+                mode = "text_and_audio"
+
+            # Optional classroom fields
+            room_id = data.get("room_id")
+            speaker_id = data.get("speaker_id")
+            speaker_name = data.get("speaker_name")
+            speaker_language = data.get("speaker_language")
+
+            return {
+                "system_prompt": system_prompt,
+                "context": context,
+                "mode": mode,
+                "room_id": room_id,
+                "speaker_id": speaker_id,
+                "speaker_name": speaker_name,
+                "speaker_language": speaker_language,
+            }
         else:
             logger.info("First message was not a config message, using defaults")
-            return {"system_prompt": None, "context": None}
+            return {
+                "system_prompt": None,
+                "context": None,
+                "mode": "text_and_audio",
+                "room_id": None,
+                "speaker_id": None,
+                "speaker_name": None,
+                "speaker_language": None,
+            }
 
     except asyncio.TimeoutError:
         logger.info("No config message received within timeout, using defaults")
-        return {"system_prompt": None, "context": None}
+        return {
+            "system_prompt": None,
+            "context": None,
+            "mode": "text_and_audio",
+            "room_id": None,
+            "speaker_id": None,
+            "speaker_name": None,
+            "speaker_language": None,
+        }
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in config message: {e}, using defaults")
-        return {"system_prompt": None, "context": None}
+        return {
+            "system_prompt": None,
+            "context": None,
+            "mode": "text_and_audio",
+            "room_id": None,
+            "speaker_id": None,
+            "speaker_name": None,
+            "speaker_language": None,
+        }
     except Exception as e:
         logger.warning(f"Error receiving config: {e}, using defaults")
-        return {"system_prompt": None, "context": None}
+        return {
+            "system_prompt": None,
+            "context": None,
+            "mode": "text_and_audio",
+            "room_id": None,
+            "speaker_id": None,
+            "speaker_name": None,
+            "speaker_language": None,
+        }
 
 
 @app.websocket("/ws")
@@ -182,10 +259,33 @@ async def websocket_endpoint(websocket: WebSocket):
     config = await receive_client_config(websocket, timeout=1.0)
 
     try:
+        room_id = config.get("room_id")
+        speaker_id = config.get("speaker_id")
+
+        extra_processors = None
+        if room_id:
+            room = room_manager.get_room(room_id)
+            if not room:
+                await websocket.send_json({"type": "error", "message": "Room not found"})
+                await websocket.close()
+                return
+            if not speaker_id or room.speaker_id != speaker_id:
+                await websocket.send_json({"type": "error", "message": "Speaker token required for classroom session"})
+                await websocket.close()
+                return
+            if speaker_id not in room.users:
+                await websocket.send_json({"type": "error", "message": "Speaker must join classroom room first"})
+                await websocket.close()
+                return
+            extra_processors = [ClassroomBroadcaster(room=room, room_mgr=room_manager)]
+            logger.info(f"[CLASSROOM] Attached broadcaster for room {room_id} (speaker={speaker_id})")
+
         await run_bot(
             websocket=websocket,
             system_prompt=config.get("system_prompt"),
             context_messages=config.get("context"),
+            mode=config.get("mode", "text_and_audio"),
+            extra_processors=extra_processors,
         )
     except WebSocketDisconnect:
         logger.info("Client disconnected")
