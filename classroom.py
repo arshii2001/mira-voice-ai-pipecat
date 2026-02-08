@@ -89,6 +89,9 @@ class Room:
     hand_raises: List[dict] = field(default_factory=list)  # live hand-raise queue
     active_session_id: Optional[str] = None  # DB session ID for persistence
     topic: Optional[str] = None  # Current topic (for topic suggestions)
+    teacher_id: Optional[str] = None  # Room creator = teacher
+    current_lesson_topic: Optional[str] = None  # Current lesson topic set by teacher
+    conversation_history: List[dict] = field(default_factory=list)  # [{role, content}] for LLM context
 
 
     def to_dict(self) -> dict:
@@ -105,6 +108,7 @@ class Room:
                     "language": u.language,
                     "mode": u.mode,
                     "is_speaker": u.is_speaker,
+                    "is_teacher": u.user_id == self.teacher_id,
                 }
                 for u in self.users.values()
             ],
@@ -114,6 +118,8 @@ class Room:
             "hand_raises": self.hand_raises,
             "active_session_id": self.active_session_id,
             "topic": self.topic,
+            "teacher_id": self.teacher_id,
+            "current_lesson_topic": self.current_lesson_topic,
         }
 
 
@@ -181,8 +187,47 @@ class RoomManager:
         else:
             logger.warning("No LLM API key — classroom text mode disabled")
 
-    async def ask_llm(self, question: str, speaker_ws: WebSocket) -> Optional[str]:
-        """Send a text question to the LLM, stream tokens to speaker, return full response."""
+    def _get_co_teaching_prompt(self, room: Optional["Room"] = None) -> str:
+        """Return the co-teaching system prompt for AI-assisted teaching mode."""
+        topic_line = ""
+        if room and room.current_lesson_topic:
+            topic_line = f"\nCurrent lesson topic: {room.current_lesson_topic}\n"
+
+        return (
+            "You are Mira, an AI co-teacher in a live classroom. "
+            "A human teacher is guiding the lesson. Students are listening.\n\n"
+            "## YOUR ROLE\n"
+            "- You are the teacher's teaching assistant. Support them.\n"
+            "- Give structured explanations — not just answers. Use step-by-step breakdowns.\n"
+            "- Use analogies and real-world examples to make concepts stick.\n"
+            "- When explaining, break complex topics into digestible steps.\n"
+            "- Occasionally check understanding: 'Does that make sense?' or "
+            "'Let me check — can someone tell me...'\n"
+            "- Maintain full lesson context — remember what was covered.\n\n"
+            f"{topic_line}"
+            "## TEACHER COMMANDS (respond appropriately)\n"
+            "- [TEACHER_ACTION: SET_TOPIC <topic>] — Introduce this topic with a structured overview. "
+            "Give a clear 3-4 sentence introduction, mention what students will learn.\n"
+            "- [TEACHER_ACTION: QUIZ] — Generate exactly 3 quick-check questions about what was just discussed. "
+            "Format: number each question, give 4 options (A-D), mark the correct answer.\n"
+            "- [TEACHER_ACTION: SUMMARIZE] — Produce a checkpoint summary of the lesson so far. "
+            "List the key points covered, what students should remember.\n"
+            "- [TEACHER_ACTION: SIMPLIFY] — Re-explain the last point more simply. "
+            "Use a different analogy, simpler words, or a concrete example.\n"
+            "- [TEACHER_ACTION: NEXT] — Move to the next logical subtopic. "
+            "Bridge from what was just covered to the next concept naturally.\n\n"
+            "## RESPONSE RULES\n"
+            "- Do NOT greet or introduce yourself — just respond to what's asked.\n"
+            "- Keep responses concise but educational (aim for 2-5 sentences normally, "
+            "longer for topic introductions and quizzes).\n"
+            "- Use simple language suitable for students.\n"
+            "- When a student asks a question, guide them to understanding rather than "
+            "just giving the answer.\n"
+        )
+
+    async def ask_llm(self, question: str, speaker_ws: WebSocket, room: Optional["Room"] = None) -> Optional[str]:
+        """Send a text question to the LLM, stream tokens to speaker, return full response.
+        Maintains conversation history per room for context continuity."""
         if not self._llm_client:
             try:
                 await speaker_ws.send_json({"type": "error", "message": "LLM not configured"})
@@ -190,26 +235,24 @@ class RoomManager:
                 pass
             return None
 
-        # Use a text-mode system prompt that doesn't trigger greetings
-        system_prompt = (
-            "You are Mira, a helpful and knowledgeable study buddy for students. "
-            "Answer the user's question directly and concisely. "
-            "Do NOT greet the user or introduce yourself — just answer the question. "
-            "Keep responses clear and educational, suitable for a classroom setting. "
-            "Use simple language and examples where helpful."
-        )
+        # Use co-teaching prompt
+        system_prompt = self._get_co_teaching_prompt(room)
 
         t0 = time.time()
         full_response = ""
 
+        # Build messages with conversation history for context
+        messages = [{"role": "system", "content": system_prompt}]
+        if room and room.conversation_history:
+            # Include last 20 messages for context
+            messages.extend(room.conversation_history[-20:])
+        messages.append({"role": "user", "content": question})
+
         try:
             stream = await self._llm_client.chat.completions.create(
                 model=self._llm_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question},
-                ],
-                max_tokens=500,
+                messages=messages,
+                max_tokens=800,
                 temperature=0.7,
                 stream=True,
             )
@@ -237,6 +280,14 @@ class RoomManager:
                 })
             except Exception:
                 pass
+
+            # Update conversation history for context continuity
+            if room:
+                room.conversation_history.append({"role": "user", "content": question})
+                room.conversation_history.append({"role": "assistant", "content": full_response})
+                # Keep history manageable
+                if len(room.conversation_history) > 40:
+                    room.conversation_history = room.conversation_history[-30:]
 
             latency_ms = round((time.time() - t0) * 1000, 1)
             logger.info(
@@ -519,12 +570,12 @@ class RoomManager:
 
     # ── Room CRUD ──
 
-    def create_room(self, name: str = "Classroom") -> Room:
-        """Create a new room."""
+    def create_room(self, name: str = "Classroom", teacher_id: Optional[str] = None) -> Room:
+        """Create a new room. The creator becomes the teacher."""
         room_id = str(uuid.uuid4())[:8]
-        room = Room(room_id=room_id, name=name)
+        room = Room(room_id=room_id, name=name, teacher_id=teacher_id)
         self._rooms[room_id] = room
-        logger.info(f"[CLASSROOM] Room created: {room_id} ({name})")
+        logger.info(f"[CLASSROOM] Room created: {room_id} ({name}) teacher={teacher_id}")
         return room
 
     def get_room(self, room_id: str) -> Optional[Room]:
@@ -598,14 +649,17 @@ class RoomManager:
     async def finalize_join(self, room_id: str, user_id: str):
         """
         Called after the 'joined' response is sent to the user.
-        Handles auto-assignment of speaker token for the first user.
+        Handles auto-assignment of speaker token for the first user or teacher.
         """
         room = self.get_room(room_id)
         if not room:
             return
 
+        # If this is the teacher joining and no one is speaking, give them the token
+        if user_id == room.teacher_id and room.speaker_id is None:
+            await self._assign_token(room, user_id)
         # If first user, auto-assign speaker token
-        if len(room.users) == 1 and room.speaker_id is None:
+        elif len(room.users) == 1 and room.speaker_id is None:
             await self._assign_token(room, user_id)
 
     async def remove_user(self, room_id: str, user_id: str):
@@ -647,7 +701,7 @@ class RoomManager:
     # ── Speaker token ──
 
     async def request_token(self, room_id: str, user_id: str) -> bool:
-        """Request the speaker token."""
+        """Request the speaker token. Teacher gets priority (can reclaim anytime)."""
         room = self.get_room(room_id)
         if not room or user_id not in room.users:
             return False
@@ -658,6 +712,11 @@ class RoomManager:
             return True
         elif room.speaker_id == user_id:
             # Already the speaker
+            return True
+        elif user_id == room.teacher_id:
+            # Teacher always gets priority — reclaim token immediately
+            logger.info(f"[CLASSROOM] Teacher {user_id} reclaiming token in {room_id}")
+            await self._assign_token(room, user_id)
             return True
         else:
             # Add to queue
@@ -1075,9 +1134,9 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 
 
 @router.post("/rooms")
-async def create_room(name: str = "Classroom"):
-    """Create a new classroom room."""
-    room = room_manager.create_room(name=name)
+async def create_room(name: str = "Classroom", teacher_id: str = None):
+    """Create a new classroom room. The creator becomes the teacher."""
+    room = room_manager.create_room(name=name, teacher_id=teacher_id)
     return room.to_dict()
 
 
@@ -1235,6 +1294,11 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             mode=mode,
         )
 
+        # If no teacher assigned yet, the first user to join becomes teacher
+        if room.teacher_id is None:
+            room.teacher_id = user_id
+            logger.info(f"[CLASSROOM] {name} ({user_id}) is now the teacher of room {room_id}")
+
         # Add to room (does NOT auto-assign token yet)
         if not await room_manager.add_user(room_id, user):
             await websocket.send_json({"type": "error", "message": "Failed to join room"})
@@ -1251,6 +1315,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                 "language": language,
                 "mode": mode,
                 "is_speaker": user.is_speaker,
+                "is_teacher": user_id == room.teacher_id,
             },
         })
 
@@ -1300,7 +1365,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     )
 
                     # 2. Query LLM — streams tokens to speaker via bot_text / bot_text_complete
-                    llm_response = await room_manager.ask_llm(text, websocket)
+                    llm_response = await room_manager.ask_llm(text, websocket, room=room)
 
                     # 3. Broadcast Mira's response to listeners (translated)
                     if llm_response:
@@ -1311,6 +1376,68 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                         )
                 else:
                     await websocket.send_json({"type": "error", "message": "Only the speaker can send messages"})
+
+            elif msg_type == "teacher_action":
+                # Teacher toolbar action — converts to a special LLM prompt
+                action = data.get("action", "").strip().upper()
+                payload = data.get("payload", "").strip()
+                room = room_manager.get_room(room_id)
+
+                if not room:
+                    continue
+                if user.user_id != room.teacher_id:
+                    await websocket.send_json({"type": "error", "message": "Only the teacher can use lesson controls"})
+                    continue
+
+                # Build the teacher action command
+                if action == "SET_TOPIC":
+                    teacher_cmd = f"[TEACHER_ACTION: SET_TOPIC {payload}]"
+                    room.current_lesson_topic = payload
+                    # Notify all users of the topic change
+                    await room_manager._broadcast_json(room, {
+                        "type": "lesson_topic_changed",
+                        "topic": payload,
+                    })
+                elif action == "QUIZ":
+                    teacher_cmd = "[TEACHER_ACTION: QUIZ]"
+                elif action == "SUMMARIZE":
+                    teacher_cmd = "[TEACHER_ACTION: SUMMARIZE]"
+                elif action == "SIMPLIFY":
+                    teacher_cmd = "[TEACHER_ACTION: SIMPLIFY]"
+                elif action == "NEXT":
+                    teacher_cmd = "[TEACHER_ACTION: NEXT]"
+                else:
+                    await websocket.send_json({"type": "error", "message": f"Unknown teacher action: {action}"})
+                    continue
+
+                logger.info(f"[CLASSROOM] Teacher action: {action} (payload='{payload[:40] if payload else ''}')")
+
+                # Don't broadcast the raw command to listeners — just send a label
+                display_text = {
+                    "SET_TOPIC": f"📝 Topic: {payload}",
+                    "QUIZ": "❓ Quiz time!",
+                    "SUMMARIZE": "📋 Let's summarize what we've covered",
+                    "SIMPLIFY": "🔄 Let me simplify that",
+                    "NEXT": "⏭️ Moving to the next topic",
+                }.get(action, action)
+
+                # Broadcast a neutral message to listeners
+                await room_manager.broadcast_transcription(
+                    room=room,
+                    speaker_id=user.user_id,
+                    text=display_text,
+                    language="en",
+                )
+
+                # Query LLM with the teacher command (don't show command to students)
+                llm_response = await room_manager.ask_llm(teacher_cmd, websocket, room=room)
+
+                if llm_response:
+                    await room_manager.broadcast_bot_response(
+                        room=room,
+                        text=llm_response,
+                        language=user.language,
+                    )
 
             elif msg_type == "set_mode":
                 # Switch between text_only and text_and_audio at runtime

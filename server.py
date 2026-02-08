@@ -267,6 +267,7 @@ async def websocket_endpoint(websocket: WebSocket):
         speaker_id = config.get("speaker_id")
 
         extra_processors = None
+        classroom_system_prompt = config.get("system_prompt")
         if room_id:
             room = room_manager.get_room(room_id)
             if not room:
@@ -282,11 +283,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close()
                 return
             extra_processors = [ClassroomBroadcaster(room=room, room_mgr=room_manager)]
-            logger.info(f"[CLASSROOM] Attached broadcaster for room {room_id} (speaker={speaker_id})")
+            # Use co-teaching prompt for classroom voice sessions
+            classroom_system_prompt = room_manager._get_co_teaching_prompt(room)
+            logger.info(f"[CLASSROOM] Attached broadcaster for room {room_id} (speaker={speaker_id}) with co-teaching prompt")
 
         await run_bot(
             websocket=websocket,
-            system_prompt=config.get("system_prompt"),
+            system_prompt=classroom_system_prompt,
             context_messages=config.get("context"),
             mode=config.get("mode", "text_and_audio"),
             extra_processors=extra_processors,
