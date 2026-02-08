@@ -387,8 +387,9 @@ class TextStreamForwarder(FrameProcessor):
                     "text": frame.text,
                     "streaming": True,
                 })
+                logger.info(f"[TEXT_STREAM] Sent bot_text chunk: '{frame.text}'")
             except Exception as e:
-                logger.debug(f"[TEXT_STREAM] Failed to send text chunk: {e}")
+                logger.warning(f"[TEXT_STREAM] Failed to send text chunk: {e}")
             # Always push downstream (to TTS in audio mode, or to assistant aggregator)
             await self.push_frame(frame, direction)
 
