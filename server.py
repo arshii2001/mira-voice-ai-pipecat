@@ -57,8 +57,12 @@ PORT = int(os.getenv("PORT", "7860"))
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting MiraVoiceAI Pipecat server...")
+    # Initialize classroom database
+    await room_manager.init_db()
     yield
     logger.info("Shutting down MiraVoiceAI Pipecat server...")
+    from database import db as classroom_db
+    await classroom_db.close()
 
 
 app = FastAPI(

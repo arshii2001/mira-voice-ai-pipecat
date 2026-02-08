@@ -56,6 +56,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from translator import Translator, LANG_NAMES
+from database import db as classroom_db
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ class Room:
     users: Dict[str, RoomUser] = field(default_factory=dict)
     speaker_id: Optional[str] = None
     token_queue: List[str] = field(default_factory=list)  # user_ids waiting for token
+    hand_raises: List[dict] = field(default_factory=list)  # live hand-raise queue
+    active_session_id: Optional[str] = None  # DB session ID for persistence
+    topic: Optional[str] = None  # Current topic (for topic suggestions)
 
 
     def to_dict(self) -> dict:
@@ -107,6 +111,9 @@ class Room:
             "speaker_id": self.speaker_id,
             "speaker_name": self.users[self.speaker_id].name if self.speaker_id and self.speaker_id in self.users else None,
             "token_queue": self.token_queue,
+            "hand_raises": self.hand_raises,
+            "active_session_id": self.active_session_id,
+            "topic": self.topic,
         }
 
 
@@ -246,12 +253,269 @@ class RoomManager:
                 pass
             return None
 
+    async def init_db(self):
+        """Initialize the database (called from server lifespan)."""
+        await classroom_db.init()
+        logger.info("[CLASSROOM] Database initialized")
+
     def _create_default_room(self):
         """Create a permanent default room that persists even when empty."""
         room = Room(room_id=DEFAULT_ROOM_ID, name=DEFAULT_ROOM_NAME)
         self._rooms[DEFAULT_ROOM_ID] = room
         self._permanent_rooms.add(DEFAULT_ROOM_ID)
         logger.info(f"[CLASSROOM] Default permanent room created: {DEFAULT_ROOM_ID} ({DEFAULT_ROOM_NAME})")
+
+    async def _ensure_session(self, room: Room):
+        """Ensure the room has an active DB session. Create one if not."""
+        if room.active_session_id:
+            return room.active_session_id
+        try:
+            session = await classroom_db.create_session(room.room_id, room.name)
+            room.active_session_id = session.id
+            logger.info(f"[CLASSROOM] DB session started: {session.id} for room {room.room_id}")
+            return session.id
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to create DB session: {e}")
+            return None
+
+    async def _end_session(self, room: Room):
+        """End the DB session for a room."""
+        if room.active_session_id:
+            try:
+                await classroom_db.end_session(room.active_session_id)
+                logger.info(f"[CLASSROOM] DB session ended: {room.active_session_id}")
+            except Exception as e:
+                logger.error(f"[CLASSROOM] Failed to end DB session: {e}")
+            room.active_session_id = None
+
+    async def save_message_to_db(
+        self, room: Room, role: str, content: str,
+        speaker_id: str = None, speaker_name: str = None,
+        original_language: str = "en", translations: dict = None,
+    ) -> Optional[str]:
+        """Save a message to the database. Returns message ID."""
+        session_id = await self._ensure_session(room)
+        if not session_id:
+            return None
+        try:
+            msg = await classroom_db.save_message(
+                session_id=session_id,
+                room_id=room.room_id,
+                role=role,
+                content=content,
+                speaker_id=speaker_id,
+                speaker_name=speaker_name,
+                original_language=original_language,
+                translations=translations,
+            )
+            return msg.id
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to save message: {e}")
+            return None
+
+    # ── Hand Raises ──
+
+    async def raise_hand(self, room: Room, user_id: str, question_preview: str = None) -> Optional[dict]:
+        """User raises their hand to ask a question."""
+        user = room.users.get(user_id)
+        if not user:
+            return None
+
+        # Check if already raised
+        for hr in room.hand_raises:
+            if hr["user_id"] == user_id and hr["status"] == "pending":
+                return None  # Already raised
+
+        raise_id = str(uuid.uuid4())[:8]
+        hr_entry = {
+            "id": raise_id,
+            "user_id": user_id,
+            "user_name": user.name,
+            "question_preview": question_preview,
+            "status": "pending",
+            "raised_at": time.time(),
+        }
+        room.hand_raises.append(hr_entry)
+
+        # Persist to DB
+        session_id = await self._ensure_session(room)
+        if session_id:
+            try:
+                await classroom_db.create_hand_raise(
+                    session_id=session_id,
+                    room_id=room.room_id,
+                    user_id=user_id,
+                    user_name=user.name,
+                    question_preview=question_preview,
+                )
+            except Exception as e:
+                logger.error(f"[CLASSROOM] Failed to save hand raise to DB: {e}")
+
+        logger.info(f"[CLASSROOM] Hand raised: {user.name} in room {room.room_id}")
+        return hr_entry
+
+    async def lower_hand(self, room: Room, user_id: str):
+        """User lowers their hand."""
+        room.hand_raises = [hr for hr in room.hand_raises
+                            if not (hr["user_id"] == user_id and hr["status"] == "pending")]
+        logger.info(f"[CLASSROOM] Hand lowered: {user_id} in room {room.room_id}")
+
+    async def acknowledge_hand(self, room: Room, raise_id: str, acknowledged_by: str) -> Optional[dict]:
+        """Speaker/teacher acknowledges a hand raise — passes token to that user."""
+        for hr in room.hand_raises:
+            if hr["id"] == raise_id and hr["status"] == "pending":
+                hr["status"] = "acknowledged"
+                hr["resolved_at"] = time.time()
+                # Pass token to the hand-raiser
+                await self.pass_token(room.room_id, acknowledged_by, hr["user_id"])
+                logger.info(f"[CLASSROOM] Hand acknowledged: {hr['user_name']} → gets token")
+                return hr
+        return None
+
+    async def dismiss_hand(self, room: Room, raise_id: str):
+        """Dismiss a hand raise without passing token."""
+        for hr in room.hand_raises:
+            if hr["id"] == raise_id and hr["status"] == "pending":
+                hr["status"] = "dismissed"
+                hr["resolved_at"] = time.time()
+                return hr
+        return None
+
+    # ── Reactions ──
+
+    async def add_reaction(self, room: Room, message_id: str, user_id: str, emoji: str) -> bool:
+        """Add a reaction to a message."""
+        session_id = await self._ensure_session(room)
+        if not session_id:
+            return False
+        try:
+            return await classroom_db.add_reaction(
+                message_id=message_id,
+                session_id=session_id,
+                user_id=user_id,
+                emoji=emoji,
+            )
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to add reaction: {e}")
+            return False
+
+    async def remove_reaction(self, room: Room, message_id: str, user_id: str, emoji: str) -> bool:
+        """Remove a reaction from a message."""
+        try:
+            return await classroom_db.remove_reaction(
+                message_id=message_id,
+                user_id=user_id,
+                emoji=emoji,
+            )
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to remove reaction: {e}")
+            return False
+
+    # ── Topic Suggestions ──
+
+    async def suggest_topics(self, room: Room) -> List[str]:
+        """Use LLM to suggest follow-up topics based on conversation history."""
+        if not self._llm_client:
+            return []
+
+        session_id = room.active_session_id
+        if not session_id:
+            return [
+                "Introduction to the subject",
+                "Ask a question about today's topic",
+                "Review previous material",
+            ]
+
+        try:
+            messages = await classroom_db.get_messages(session_id, limit=20)
+            if not messages:
+                return [
+                    "Start with a question about your subject",
+                    "Ask Mira to explain a concept",
+                    "Request a practice problem",
+                ]
+
+            # Build conversation context
+            convo = "\n".join([
+                f"{'Student' if m.role == 'user' else 'Mira'}: {m.content[:100]}"
+                for m in messages[-10:]
+            ])
+
+            response = await self._llm_client.chat.completions.create(
+                model=self._llm_model,
+                messages=[
+                    {"role": "system", "content":
+                     "Based on this classroom conversation, suggest exactly 3 short follow-up "
+                     "questions or topics the student could explore next. "
+                     "Return them as a JSON array of strings. No explanation."},
+                    {"role": "user", "content": convo},
+                ],
+                max_tokens=200,
+                temperature=0.7,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            topics = json.loads(raw)
+            return topics[:3] if isinstance(topics, list) else []
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Topic suggestion failed: {e}")
+            return []
+
+    # ── Session Summary + Quiz ──
+
+    async def generate_session_summary(self, session_id: str) -> Optional[dict]:
+        """Generate an AI summary and quiz for a completed session."""
+        if not self._llm_client:
+            return None
+
+        try:
+            messages = await classroom_db.get_messages(session_id, limit=100)
+            if len(messages) < 3:
+                return None
+
+            convo = "\n".join([
+                f"{'Student' if m.role == 'user' else 'Mira'} ({m.speaker_name or ''}): {m.content}"
+                for m in messages
+            ])
+
+            response = await self._llm_client.chat.completions.create(
+                model=self._llm_model,
+                messages=[
+                    {"role": "system", "content":
+                     "You are a teacher reviewing a classroom session. "
+                     "Generate a JSON object with exactly these fields:\n"
+                     '1. "summary": A 2-3 sentence summary of the key topics discussed.\n'
+                     '2. "key_concepts": An array of 3-5 key concepts covered.\n'
+                     '3. "quiz": An array of 3 quiz questions, each with:\n'
+                     '   - "question": The question text\n'
+                     '   - "options": Array of 4 answer choices\n'
+                     '   - "correct": Index (0-3) of the correct answer\n'
+                     '   - "explanation": Brief explanation of the answer\n'
+                     "Return ONLY the JSON object, no markdown or explanation."},
+                    {"role": "user", "content": f"Here is the classroom conversation:\n\n{convo}"},
+                ],
+                max_tokens=800,
+                temperature=0.5,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            result = json.loads(raw)
+
+            # Save to DB
+            await classroom_db.set_session_summary(
+                session_id=session_id,
+                summary=result.get("summary", ""),
+                quiz_json=json.dumps(result.get("quiz", [])),
+            )
+
+            logger.info(f"[CLASSROOM] Session summary generated for {session_id}")
+            return result
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Summary generation failed: {e}")
+            return None
 
     # ── Room CRUD ──
 
@@ -302,6 +566,21 @@ class RoomManager:
             f"[lang={user.language}]"
         )
 
+        # Ensure DB session exists
+        asyncio.create_task(self._ensure_session(room))
+
+        # Update participant count in DB
+        async def _update_stats():
+            if room.active_session_id:
+                try:
+                    await classroom_db.update_session_stats(
+                        room.active_session_id,
+                        participant_count=len(room.users),
+                    )
+                except Exception:
+                    pass
+        asyncio.create_task(_update_stats())
+
         # Notify other users
         await self._broadcast_json(room, {
             "type": "user_joined",
@@ -342,6 +621,10 @@ class RoomManager:
         if user_id in room.token_queue:
             room.token_queue.remove(user_id)
 
+        # Remove pending hand raises
+        room.hand_raises = [hr for hr in room.hand_raises
+                            if hr["user_id"] != user_id]
+
         # If speaker left, pass token
         if room.speaker_id == user_id:
             room.speaker_id = None
@@ -356,8 +639,9 @@ class RoomManager:
             "user_id": user_id,
         })
 
-        # Clean up empty rooms
+        # Clean up empty rooms — end DB session
         if not room.users:
+            await self._end_session(room)
             self.delete_room(room_id)
 
     # ── Speaker token ──
@@ -451,6 +735,15 @@ class RoomManager:
         if not speaker:
             return
 
+        # Persist message to DB
+        asyncio.create_task(
+            self.save_message_to_db(
+                room=room, role="user", content=text,
+                speaker_id=speaker_id, speaker_name=speaker.name,
+                original_language=language,
+            )
+        )
+
         t0 = time.time()
         listener_count = 0
 
@@ -490,6 +783,14 @@ class RoomManager:
         """Broadcast Mira's response to all listeners, translated."""
         if not self._translator:
             return
+
+        # Persist bot response to DB
+        asyncio.create_task(
+            self.save_message_to_db(
+                room=room, role="assistant", content=text,
+                speaker_name="Mira", original_language="en",
+            )
+        )
 
         t0 = time.time()
         listener_count = 0
@@ -830,6 +1131,63 @@ async def manage_token(room_id: str, action: str = "request", user_id: str = "",
         raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
 
+# ── Session History Endpoints ──
+
+@router.get("/sessions")
+async def list_sessions(room_id: str = None, limit: int = 50, offset: int = 0):
+    """List past classroom sessions."""
+    sessions = await classroom_db.list_sessions(room_id=room_id, limit=limit, offset=offset)
+    return {"sessions": [s.to_dict() for s in sessions]}
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Get a specific session with its messages."""
+    session = await classroom_db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    messages = await classroom_db.get_messages(session_id)
+    return {
+        "session": session.to_dict(),
+        "messages": [m.to_dict() for m in messages],
+    }
+
+
+@router.get("/sessions/{session_id}/summary")
+async def get_session_summary(session_id: str):
+    """Get or generate session summary + quiz."""
+    session = await classroom_db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # If summary already exists, return it
+    if session.summary:
+        return {
+            "session_id": session_id,
+            "summary": session.summary,
+            "quiz": json.loads(session.quiz_json) if session.quiz_json else None,
+        }
+
+    # Generate summary
+    result = await room_manager.generate_session_summary(session_id)
+    if result:
+        return {
+            "session_id": session_id,
+            "summary": result.get("summary"),
+            "key_concepts": result.get("key_concepts"),
+            "quiz": result.get("quiz"),
+        }
+
+    raise HTTPException(status_code=400, detail="Not enough messages to generate summary")
+
+
+@router.get("/dashboard")
+async def get_dashboard(room_id: str = None):
+    """Teacher dashboard stats."""
+    stats = await classroom_db.get_dashboard_stats(room_id=room_id)
+    return stats
+
+
 @router.websocket("/rooms/{room_id}/ws")
 async def classroom_websocket(websocket: WebSocket, room_id: str):
     """
@@ -963,6 +1321,83 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     logger.info(f"[CLASSROOM] {user.name} switched to mode={new_mode}")
                 else:
                     await websocket.send_json({"type": "error", "message": f"Invalid mode: {new_mode}"})
+
+            elif msg_type == "hand_raise":
+                # User raises hand to ask a question
+                question = data.get("question_preview", "")
+                room = room_manager.get_room(room_id)
+                if room:
+                    hr = await room_manager.raise_hand(room, user.user_id, question)
+                    if hr:
+                        await room_manager._broadcast_json(room, {
+                            "type": "hand_raised",
+                            "raise": hr,
+                        })
+
+            elif msg_type == "hand_lower":
+                # User lowers their hand
+                room = room_manager.get_room(room_id)
+                if room:
+                    await room_manager.lower_hand(room, user.user_id)
+                    await room_manager._broadcast_json(room, {
+                        "type": "hand_lowered",
+                        "user_id": user.user_id,
+                    })
+
+            elif msg_type == "hand_acknowledge":
+                # Speaker acknowledges a hand raise — passes token
+                raise_id = data.get("raise_id", "")
+                room = room_manager.get_room(room_id)
+                if room and room.speaker_id == user.user_id and raise_id:
+                    hr = await room_manager.acknowledge_hand(room, raise_id, user.user_id)
+                    if hr:
+                        await room_manager._broadcast_json(room, {
+                            "type": "hand_acknowledged",
+                            "raise": hr,
+                        })
+
+            elif msg_type == "hand_dismiss":
+                # Speaker dismisses a hand raise
+                raise_id = data.get("raise_id", "")
+                room = room_manager.get_room(room_id)
+                if room and room.speaker_id == user.user_id and raise_id:
+                    hr = await room_manager.dismiss_hand(room, raise_id)
+                    if hr:
+                        await room_manager._broadcast_json(room, {
+                            "type": "hand_dismissed",
+                            "raise": hr,
+                        })
+
+            elif msg_type == "reaction":
+                # User reacts to a message
+                msg_id = data.get("message_id", "")
+                emoji = data.get("emoji", "")
+                action = data.get("action", "add")  # "add" or "remove"
+                room = room_manager.get_room(room_id)
+                if room and msg_id and emoji:
+                    if action == "remove":
+                        success = await room_manager.remove_reaction(room, msg_id, user.user_id, emoji)
+                    else:
+                        success = await room_manager.add_reaction(room, msg_id, user.user_id, emoji)
+                    if success:
+                        await room_manager._broadcast_json(room, {
+                            "type": "reaction_update",
+                            "message_id": msg_id,
+                            "user_id": user.user_id,
+                            "user_name": user.name,
+                            "emoji": emoji,
+                            "action": action,
+                        })
+
+            elif msg_type == "request_topics":
+                # Request topic suggestions
+                room = room_manager.get_room(room_id)
+                if room:
+                    topics = await room_manager.suggest_topics(room)
+                    await websocket.send_json({
+                        "type": "topic_suggestions",
+                        "topics": topics,
+                    })
 
             else:
                 logger.debug(f"[CLASSROOM] Unknown message type: {msg_type}")

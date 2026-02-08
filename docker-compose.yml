@@ -31,6 +31,7 @@ services:
       - LOG_LEVEL=DEBUG
     volumes:
       - ./prompts:/app/prompts:ro
+      - classroom-data:/app/data
     networks:
       - mira-network
     restart: unless-stopped
@@ -110,3 +111,4 @@ networks:
 
 volumes:
   open-webui-data:
+  classroom-data:
