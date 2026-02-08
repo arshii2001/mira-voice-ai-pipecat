@@ -55,6 +55,7 @@ from starlette.websockets import WebSocketState
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from classroom import Room, RoomManager, RoomUser
+from database import db as classroom_db
 
 # ─────────────────────────────────────────────────
 # Config
@@ -162,6 +163,17 @@ async def drain_messages(ws, duration: float = 2.0) -> List[dict]:
         if msg:
             messages.append(msg)
     return messages
+
+
+async def wait_for_message_type(ws, msg_type: str, timeout: float = 5.0) -> Optional[dict]:
+    """Wait for a specific JSON message type, skipping binary frames."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        msg = await recv_json_nonbinary(ws, timeout=max(remaining, 0.1))
+        if msg and msg.get("type") == msg_type:
+            return msg
+    return None
 
 
 async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
@@ -600,6 +612,48 @@ class FakeTranslator:
         return f"[{target_lang}] {text}"
 
 
+class FakeLLMResponse:
+    def __init__(self, content: str):
+        self.choices = [type("Choice", (), {"message": type("Msg", (), {"content": content})()})()]
+
+
+class FakeLLMClient:
+    def __init__(self, content: str):
+        self._content = content
+        self.chat = self
+        self.completions = self
+
+    async def create(self, *args, **kwargs):
+        return FakeLLMResponse(self._content)
+
+
+class FakeAudioChunk:
+    def __init__(self, audio: bytes):
+        self.audio = audio
+
+
+class FakeTTS:
+    async def run_tts(self, text: str):
+        # Yield a couple of small PCM chunks
+        for _ in range(2):
+            yield FakeAudioChunk(b"\x00\x01" * 200)
+
+
+async def ensure_db():
+    """Ensure the classroom DB is initialized for tests that touch persistence."""
+    await classroom_db.init()
+
+
+async def wait_for_active_session(room_id: str, retries: int = 10) -> Optional[str]:
+    """Poll for an active session ID after users join a room."""
+    for _ in range(retries):
+        room_state = await api_get_room(room_id)
+        if room_state.get("active_session_id"):
+            return room_state["active_session_id"]
+        await asyncio.sleep(0.2)
+    return None
+
+
 async def test_broadcast_text() -> TestResult:
     """Unit test: Ravi speaks English, Priya (hi) and Anita (ta) receive translated events."""
     t0 = time.time()
@@ -718,7 +772,294 @@ async def test_broadcast_modes() -> TestResult:
 
 
 # ═════════════════════════════════════════════════
-# TEST 10: Speaker Pipeline via /ws with room_id
+# TEST 10: Broadcast Audio (Fake TTS)
+# ═════════════════════════════════════════════════
+async def test_broadcast_audio() -> TestResult:
+    """Unit test: text_and_audio listeners receive bot_audio_start/end + bytes."""
+    t0 = time.time()
+    try:
+        mgr = RoomManager()
+        mgr._translator = FakeTranslator()
+        mgr._tts = FakeTTS()
+
+        room = Room(room_id="audio1", name="Audio Test Room")
+
+        ws_ravi = DummyWebSocket()
+        ws_priya = DummyWebSocket()
+
+        ravi = RoomUser(user_id="ravi-01", name="Ravi", language="en", websocket=ws_ravi, mode="text_only", is_speaker=True)
+        priya = RoomUser(user_id="priya-01", name="Priya", language="hi", websocket=ws_priya, mode="text_and_audio")
+
+        room.users = {"ravi-01": ravi, "priya-01": priya}
+        room.speaker_id = "ravi-01"
+
+        await mgr.broadcast_bot_response(room=room, text="Hello class!", language="en")
+
+        audio_events = [m for m in ws_priya.sent_json if m.get("type") in ("bot_audio_start", "bot_audio_end")]
+        assert len(audio_events) == 2, f"Expected audio start/end events, got: {audio_events}"
+        assert len(ws_priya.sent_bytes) > 0, "Expected audio bytes for text_and_audio listener"
+
+        return TestResult(name="broadcast_audio", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="broadcast_audio", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 11: Hand Raise Flow
+# ═════════════════════════════════════════════════
+async def test_hand_raise_flow() -> TestResult:
+    """Student raises hand; teacher acknowledges; token passes."""
+    t0 = time.time()
+    try:
+        room = await api_create_room("Hand Raise Room")
+        room_id = room["room_id"]
+
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        ws_student = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+
+        await join_room(ws_teacher, room_id, "teacher-01", "Teacher", "en")
+        await drain_messages(ws_teacher, duration=1.0)
+
+        await join_room(ws_student, room_id, "student-01", "Student", "en")
+        await drain_messages(ws_student, duration=1.0)
+
+        await ws_student.send(json.dumps({"type": "hand_raise", "question_preview": "What is photosynthesis?"}))
+        raise_msg = await wait_for_message_type(ws_teacher, "hand_raised", timeout=3.0)
+        assert raise_msg and raise_msg.get("raise", {}).get("user_id") == "student-01"
+        raise_id = raise_msg["raise"]["id"]
+
+        await ws_teacher.send(json.dumps({"type": "hand_acknowledge", "raise_id": raise_id}))
+
+        # Collect messages after acknowledgment; ordering can vary
+        student_msgs = await drain_messages(ws_student, duration=3.0)
+        ack_msg = next((m for m in student_msgs if m.get("type") == "hand_acknowledged"), None)
+        token_msg = next((m for m in student_msgs if m.get("type") == "token_changed"), None)
+        assert ack_msg and ack_msg.get("raise", {}).get("id") == raise_id
+        assert token_msg and token_msg.get("speaker_id") == "student-01"
+
+        await ws_teacher.close()
+        await ws_student.close()
+        await api_delete_room(room_id)
+
+        return TestResult(name="hand_raise_flow", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="hand_raise_flow", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 12: Reactions Flow
+# ═════════════════════════════════════════════════
+async def test_reactions_flow() -> TestResult:
+    """User reacts to a message; reaction_update is broadcast and stored."""
+    t0 = time.time()
+    try:
+        await ensure_db()
+        room = await api_create_room("Reactions Room")
+        room_id = room["room_id"]
+
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        ws_student = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+
+        await join_room(ws_teacher, room_id, "teacher-01", "Teacher", "en")
+        await drain_messages(ws_teacher, duration=1.0)
+        await join_room(ws_student, room_id, "student-01", "Student", "en")
+        await drain_messages(ws_student, duration=1.0)
+
+        session_id = await wait_for_active_session(room_id)
+        assert session_id, "No active session for reactions test"
+
+        msg = await classroom_db.save_message(
+            session_id=session_id,
+            room_id=room_id,
+            role="assistant",
+            content="Hello class!",
+            speaker_name="Mira",
+            original_language="en",
+            translations={"en": "Hello class!"},
+        )
+
+        await ws_student.send(json.dumps({
+            "type": "reaction",
+            "message_id": msg.id,
+            "emoji": "👍",
+            "action": "add",
+        }))
+        reaction_msg = await wait_for_message_type(ws_teacher, "reaction_update", timeout=3.0)
+        assert reaction_msg and reaction_msg.get("message_id") == msg.id
+        assert reaction_msg.get("emoji") == "👍"
+
+        reactions = await classroom_db.get_message_reactions(msg.id)
+        assert len(reactions) == 1
+        assert reactions[0].emoji == "👍"
+
+        await ws_teacher.close()
+        await ws_student.close()
+        await api_delete_room(room_id)
+
+        return TestResult(name="reactions_flow", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="reactions_flow", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 13: Session History + Summary/Quiz
+# ═════════════════════════════════════════════════
+async def test_session_history_and_summary() -> TestResult:
+    """Persist messages, list sessions, and return stored summary/quiz."""
+    t0 = time.time()
+    try:
+        await ensure_db()
+        room = await api_create_room("History Room")
+        room_id = room["room_id"]
+
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        await join_room(ws_teacher, room_id, "teacher-01", "Teacher", "en")
+        await drain_messages(ws_teacher, duration=1.0)
+
+        session_id = await wait_for_active_session(room_id)
+        assert session_id, "No active session for history test"
+
+        # Insert a few messages
+        for i in range(3):
+            await classroom_db.save_message(
+                session_id=session_id,
+                room_id=room_id,
+                role="assistant" if i % 2 == 0 else "user",
+                content=f"Message {i}",
+                speaker_name="Mira" if i % 2 == 0 else "Teacher",
+                original_language="en",
+                translations={"en": f"Message {i}"},
+            )
+
+        # Fetch session list + session details via REST
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HTTP_URL}/classroom/sessions") as resp:
+                sessions_payload = await resp.json()
+                session_ids = [s["id"] for s in sessions_payload.get("sessions", [])]
+                assert session_id in session_ids
+
+            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}") as resp:
+                session_payload = await resp.json()
+                assert len(session_payload.get("messages", [])) >= 3
+
+            # Store summary/quiz and verify retrieval
+            quiz = [{"question": "Q1", "options": ["A", "B"], "correct": 0, "explanation": "A"}]
+            await classroom_db.set_session_summary(session_id, summary="Summary text", quiz_json=json.dumps(quiz))
+            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}/summary") as resp:
+                summary_payload = await resp.json()
+                assert summary_payload.get("summary") == "Summary text"
+                assert summary_payload.get("quiz") == quiz
+
+        await ws_teacher.close()
+        await api_delete_room(room_id)
+
+        return TestResult(name="session_history_and_summary", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="session_history_and_summary", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 14: Topic Suggestions + Dashboard
+# ═════════════════════════════════════════════════
+async def test_topics_and_dashboard() -> TestResult:
+    """Request topic suggestions and verify dashboard stats endpoints."""
+    t0 = time.time()
+    try:
+        await ensure_db()
+        room = await api_create_room("Topics Room")
+        room_id = room["room_id"]
+
+        # Unit: suggest_topics with fake LLM and real DB messages
+        mgr = RoomManager()
+        mgr._llm_client = FakeLLMClient('["Topic A","Topic B","Topic C"]')
+        room_obj = Room(room_id="topic-unit", name="Topic Unit")
+        session = await classroom_db.create_session(room_obj.room_id, room_obj.name)
+        room_obj.active_session_id = session.id
+        await classroom_db.save_message(
+            session_id=session.id,
+            room_id=room_obj.room_id,
+            role="assistant",
+            content="We discussed evaporation and condensation.",
+            speaker_name="Mira",
+            original_language="en",
+            translations={"en": "We discussed evaporation and condensation."},
+        )
+        topics = await mgr.suggest_topics(room_obj)
+        assert topics == ["Topic A", "Topic B", "Topic C"]
+
+        # API: dashboard should return stats
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HTTP_URL}/classroom/dashboard") as resp:
+                payload = await resp.json()
+                assert "total_sessions" in payload
+                assert "total_messages" in payload
+
+        await api_delete_room(room_id)
+
+        return TestResult(name="topics_and_dashboard", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="topics_and_dashboard", passed=False, error=str(e), duration_sec=time.time() - t0)
+# ═════════════════════════════════════════════════
+# TEST 10: Teacher Role + Actions
+# ═════════════════════════════════════════════════
+async def test_teacher_role_and_actions() -> TestResult:
+    """Verify teacher auto-assignment, lesson actions, and non-teacher blocking."""
+    t0 = time.time()
+    try:
+        room = await api_create_room("Teacher Actions Room")
+        room_id = room["room_id"]
+
+        # Teacher joins first
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        joined_teacher = await join_room(ws_teacher, room_id, "teacher-01", "Teacher", "en")
+        assert joined_teacher["you"]["is_teacher"] is True
+        assert joined_teacher["room"]["teacher_id"] == "teacher-01"
+        await drain_messages(ws_teacher, duration=1.0)  # token_changed, etc.
+
+        # Student joins
+        ws_student = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        joined_student = await join_room(ws_student, room_id, "student-01", "Student", "en")
+        assert joined_student["you"]["is_teacher"] is False
+        await drain_messages(ws_student, duration=1.0)
+
+        # Teacher sets topic
+        await ws_teacher.send(json.dumps({
+            "type": "teacher_action",
+            "action": "SET_TOPIC",
+            "payload": "Photosynthesis",
+        }))
+        topic_msg = await wait_for_message_type(ws_student, "lesson_topic_changed", timeout=4.0)
+        assert topic_msg and topic_msg.get("topic") == "Photosynthesis"
+
+        # Room state should reflect topic
+        room_state = await api_get_room(room_id)
+        assert room_state["current_lesson_topic"] == "Photosynthesis"
+
+        # Student should be blocked from teacher actions
+        await ws_student.send(json.dumps({
+            "type": "teacher_action",
+            "action": "QUIZ",
+        }))
+        err = await wait_for_message_type(ws_student, "error", timeout=3.0)
+        assert err and "Only the teacher" in err.get("message", "")
+
+        await ws_teacher.close()
+        await ws_student.close()
+        await api_delete_room(room_id)
+
+        return TestResult(name="teacher_role_and_actions", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="teacher_role_and_actions", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 15: Speaker Pipeline via /ws with room_id
 # ═════════════════════════════════════════════════
 async def test_speaker_pipeline() -> TestResult:
     """Full pipeline: speaker connects /ws with room_id, listeners receive translated events."""
@@ -862,6 +1203,12 @@ ALL_TESTS = {
     "user_disconnect": test_user_disconnect,
     "broadcast_text": test_broadcast_text,
     "broadcast_modes": test_broadcast_modes,
+    "broadcast_audio": test_broadcast_audio,
+    "teacher_role_and_actions": test_teacher_role_and_actions,
+    "hand_raise_flow": test_hand_raise_flow,
+    "reactions_flow": test_reactions_flow,
+    "session_history_and_summary": test_session_history_and_summary,
+    "topics_and_dashboard": test_topics_and_dashboard,
     "speaker_pipeline": test_speaker_pipeline,
 }
 
