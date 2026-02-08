@@ -70,8 +70,9 @@ from services.soniox_stt import SonioxSTTService
 from services.elevenlabs_tts import create_elevenlabs_tts
 
 # Configure logging
+# Control verbosity via LOG_LEVEL env var: DEBUG, INFO (default), WARNING, ERROR
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -368,7 +369,7 @@ class TextStreamForwarder(FrameProcessor):
                     "type": "bot_text_complete",
                     "text": frame.text,
                 })
-                logger.info(f"[TEXT_STREAM] Greeting text sent: '{frame.text[:120]}'")
+                logger.debug(f"[TEXT_STREAM] Greeting text sent: '{frame.text[:120]}'")
             except Exception as e:
                 logger.debug(f"[TEXT_STREAM] Failed to send greeting text: {e}")
 
@@ -387,7 +388,7 @@ class TextStreamForwarder(FrameProcessor):
                     "text": frame.text,
                     "streaming": True,
                 })
-                logger.info(f"[TEXT_STREAM] Sent bot_text chunk: '{frame.text}'")
+                logger.debug(f"[TEXT_STREAM] Sent bot_text chunk: '{frame.text}'")
             except Exception as e:
                 logger.warning(f"[TEXT_STREAM] Failed to send text chunk: {e}")
             # Always push downstream (to TTS in audio mode, or to assistant aggregator)
