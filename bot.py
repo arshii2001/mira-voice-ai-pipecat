@@ -412,6 +412,50 @@ class TextStreamForwarder(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
+class UserTranscriptForwarder(FrameProcessor):
+    """
+    Sends STT transcription results back to the client as JSON messages
+    so the frontend can display what the user said.
+
+    JSON messages sent:
+      - {"type": "user_transcript", "text": "...", "final": true}   — final transcript
+      - {"type": "user_transcript", "text": "...", "final": false}  — interim transcript
+    """
+
+    def __init__(self, websocket, name: str = "UserTranscriptForwarder", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self._websocket = websocket
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TranscriptionFrame):
+            try:
+                await self._websocket.send_json({
+                    "type": "user_transcript",
+                    "text": frame.text,
+                    "final": True,
+                })
+                logger.info(f"[USER_TEXT] Sent final transcript: '{frame.text[:80]}'")
+            except Exception as e:
+                logger.warning(f"[USER_TEXT] Failed to send transcript: {e}")
+            await self.push_frame(frame, direction)
+
+        elif isinstance(frame, InterimTranscriptionFrame):
+            try:
+                await self._websocket.send_json({
+                    "type": "user_transcript",
+                    "text": frame.text,
+                    "final": False,
+                })
+            except Exception as e:
+                logger.debug(f"[USER_TEXT] Failed to send interim: {e}")
+            await self.push_frame(frame, direction)
+
+        else:
+            await self.push_frame(frame, direction)
+
+
 class GreetingProcessor(FrameProcessor):
     """
     Processor that speaks a greeting when the pipeline starts.
@@ -757,38 +801,44 @@ async def create_bot_pipeline(
         name="TextStreamForwarder",
     )
 
+    # UserTranscriptForwarder sends STT transcripts back to client as JSON
+    user_transcript_forwarder = UserTranscriptForwarder(
+        websocket=websocket,
+        name="UserTranscriptForwarder",
+    )
+
     # Build pipeline
     extra_processors = extra_processors or []
     if text_only:
         logger.info("[PIPELINE] text_only mode: TTS skipped, text streamed via JSON")
-        # Flow: input -> STT -> aggregator -> LLM -> logger -> greeting -> text_forwarder -> output -> assistant_aggregator
         pipeline = Pipeline([
-            transport.input(),          # 1. Receive audio from client
-            stt,                        # 2. Speech-to-text
-            user_aggregator,            # 3. Collect user messages and trigger LLM
-            llm,                        # 4. Language model
-            transcript_logger,          # 5. Log conversation turns
-            *extra_processors,          # 6. Optional taps (e.g., classroom)
-            greeting_processor,         # 6. Inject greeting on StartFrame
-            text_forwarder,             # 7. Stream text as JSON (TTS skipped)
-            transport.output(),         # 8. Transport (audio-in still works)
-            assistant_aggregator,       # 9. Collect assistant responses for context
+            transport.input(),              # 1. Receive audio from client
+            stt,                            # 2. Speech-to-text
+            user_transcript_forwarder,      # 3. Send user transcript to client
+            user_aggregator,                # 4. Collect user messages and trigger LLM
+            llm,                            # 5. Language model
+            transcript_logger,              # 6. Log conversation turns
+            *extra_processors,              # 7. Optional taps (e.g., classroom)
+            greeting_processor,             # 8. Inject greeting on StartFrame
+            text_forwarder,                 # 9. Stream text as JSON (TTS skipped)
+            transport.output(),             # 10. Transport (audio-in still works)
+            assistant_aggregator,           # 11. Collect assistant responses for context
         ])
     else:
         logger.info("[PIPELINE] text_and_audio mode: text streamed + TTS audio")
-        # Flow: input -> STT -> aggregator -> LLM -> logger -> greeting -> text_forwarder -> TTS -> output -> assistant_aggregator
         pipeline = Pipeline([
-            transport.input(),          # 1. Receive audio from client
-            stt,                        # 2. Speech-to-text
-            user_aggregator,            # 3. Collect user messages and trigger LLM
-            llm,                        # 4. Language model
-            transcript_logger,          # 5. Log conversation turns
-            *extra_processors,          # 6. Optional taps (e.g., classroom)
-            greeting_processor,         # 6. Inject greeting on StartFrame
-            text_forwarder,             # 7. Stream text as JSON to client
-            tts,                        # 8. Text-to-speech (audio)
-            transport.output(),         # 9. Send audio to client
-            assistant_aggregator,       # 10. Collect assistant responses for context
+            transport.input(),              # 1. Receive audio from client
+            stt,                            # 2. Speech-to-text
+            user_transcript_forwarder,      # 3. Send user transcript to client
+            user_aggregator,                # 4. Collect user messages and trigger LLM
+            llm,                            # 5. Language model
+            transcript_logger,              # 6. Log conversation turns
+            *extra_processors,              # 7. Optional taps (e.g., classroom)
+            greeting_processor,             # 8. Inject greeting on StartFrame
+            text_forwarder,                 # 9. Stream text as JSON to client
+            tts,                            # 10. Text-to-speech (audio)
+            transport.output(),             # 11. Send audio to client
+            assistant_aggregator,           # 12. Collect assistant responses for context
         ])
 
     # Create task and runner
