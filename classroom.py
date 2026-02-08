@@ -51,6 +51,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import openai
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
@@ -114,15 +115,24 @@ class Room:
 # ─────────────────────────────────────────────────────────────────────
 
 
+DEFAULT_ROOM_ID = os.getenv("CLASSROOM_DEFAULT_ROOM_ID", "default")
+DEFAULT_ROOM_NAME = os.getenv("CLASSROOM_DEFAULT_ROOM_NAME", "Mira Classroom")
+
+
 class RoomManager:
     """Manages classroom rooms, users, and speaker tokens."""
 
     def __init__(self):
         self._rooms: Dict[str, Room] = {}
+        self._permanent_rooms: set = set()  # room IDs that survive empty state
         self._translator: Optional[Translator] = None
         self._tts = None  # Shared TTS service for listener audio
+        self._llm_client: Optional[openai.AsyncOpenAI] = None
+        self._llm_model: str = "gpt-4o-mini"
         self._init_translator()
         self._init_tts()
+        self._init_llm()
+        self._create_default_room()
 
     def _init_translator(self):
         """Initialize the translator with the same LLM config as bot.py."""
@@ -141,13 +151,107 @@ class RoomManager:
             logger.warning("No LLM API key found — classroom translation disabled")
 
     def _init_tts(self):
-        """Initialize shared TTS service for listener audio synthesis."""
+        """Initialize standalone TTS service for listener audio synthesis."""
         try:
-            from bot import create_tts_service
-            self._tts = create_tts_service(sample_rate=24000)
-            logger.info("Classroom TTS service initialized (provider-agnostic)")
+            from services.classroom_tts import create_classroom_tts
+            self._tts = create_classroom_tts(sample_rate=24000)
+            if self._tts:
+                logger.info("Classroom TTS initialized (ElevenLabs REST API)")
+            else:
+                logger.warning("Classroom TTS not available — listeners will get text only")
         except Exception as e:
             logger.warning(f"Could not init classroom TTS: {e} — listeners will get text only")
+
+    def _init_llm(self):
+        """Initialize LLM client for text-mode queries."""
+        api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        self._llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+        if api_key:
+            self._llm_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+            logger.info(f"Classroom LLM client initialized (model={self._llm_model})")
+        else:
+            logger.warning("No LLM API key — classroom text mode disabled")
+
+    async def ask_llm(self, question: str, speaker_ws: WebSocket) -> Optional[str]:
+        """Send a text question to the LLM, stream tokens to speaker, return full response."""
+        if not self._llm_client:
+            try:
+                await speaker_ws.send_json({"type": "error", "message": "LLM not configured"})
+            except Exception:
+                pass
+            return None
+
+        # Use a text-mode system prompt that doesn't trigger greetings
+        system_prompt = (
+            "You are Mira, a helpful and knowledgeable study buddy for students. "
+            "Answer the user's question directly and concisely. "
+            "Do NOT greet the user or introduce yourself — just answer the question. "
+            "Keep responses clear and educational, suitable for a classroom setting. "
+            "Use simple language and examples where helpful."
+        )
+
+        t0 = time.time()
+        full_response = ""
+
+        try:
+            stream = await self._llm_client.chat.completions.create(
+                model=self._llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question},
+                ],
+                max_tokens=500,
+                temperature=0.7,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    token = delta.content
+                    full_response += token
+                    # Stream each token to the speaker
+                    try:
+                        await speaker_ws.send_json({
+                            "type": "bot_text",
+                            "text": token,
+                            "streaming": True,
+                        })
+                    except Exception:
+                        break
+
+            # Send complete response
+            try:
+                await speaker_ws.send_json({
+                    "type": "bot_text_complete",
+                    "text": full_response,
+                })
+            except Exception:
+                pass
+
+            latency_ms = round((time.time() - t0) * 1000, 1)
+            logger.info(
+                f"[CLASSROOM] LLM text query | latency={latency_ms}ms | "
+                f"q='{question[:50]}' | a='{full_response[:50]}'"
+            )
+            return full_response
+
+        except Exception as e:
+            logger.error(f"[CLASSROOM] LLM query failed: {e}")
+            try:
+                await speaker_ws.send_json({"type": "error", "message": f"LLM error: {e}"})
+            except Exception:
+                pass
+            return None
+
+    def _create_default_room(self):
+        """Create a permanent default room that persists even when empty."""
+        room = Room(room_id=DEFAULT_ROOM_ID, name=DEFAULT_ROOM_NAME)
+        self._rooms[DEFAULT_ROOM_ID] = room
+        self._permanent_rooms.add(DEFAULT_ROOM_ID)
+        logger.info(f"[CLASSROOM] Default permanent room created: {DEFAULT_ROOM_ID} ({DEFAULT_ROOM_NAME})")
 
     # ── Room CRUD ──
 
@@ -168,7 +272,10 @@ class RoomManager:
         return [room.to_dict() for room in self._rooms.values()]
 
     def delete_room(self, room_id: str) -> bool:
-        """Delete a room."""
+        """Delete a room. Permanent rooms cannot be deleted."""
+        if room_id in self._permanent_rooms:
+            logger.info(f"[CLASSROOM] Skipping delete of permanent room: {room_id}")
+            return False
         if room_id in self._rooms:
             del self._rooms[room_id]
             logger.info(f"[CLASSROOM] Room deleted: {room_id}")
@@ -498,7 +605,7 @@ class RoomManager:
 
                 try:
                     async for frame in self._tts.run_tts(tts_text):
-                        # TTSAudioRawFrame has .audio (bytes)
+                        # AudioChunk has .audio (raw PCM bytes)
                         if hasattr(frame, "audio") and frame.audio:
                             await self._send_bytes(user.websocket, frame.audio)
                             audio_bytes_sent += len(frame.audio)
@@ -818,6 +925,34 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
 
             elif msg_type == "release_token":
                 await room_manager.release_token(room_id, user.user_id)
+
+            elif msg_type == "text_message":
+                # Speaker typed a text question — query LLM, stream to speaker, broadcast to listeners
+                text = data.get("text", "").strip()
+                room = room_manager.get_room(room_id)
+                if text and room and room.speaker_id == user.user_id:
+                    logger.info(f"[CLASSROOM] Text message from {user.name}: {text[:60]}")
+
+                    # 1. Broadcast the speaker's question to listeners (translated)
+                    await room_manager.broadcast_transcription(
+                        room=room,
+                        speaker_id=user.user_id,
+                        text=text,
+                        language=user.language,
+                    )
+
+                    # 2. Query LLM — streams tokens to speaker via bot_text / bot_text_complete
+                    llm_response = await room_manager.ask_llm(text, websocket)
+
+                    # 3. Broadcast Mira's response to listeners (translated)
+                    if llm_response:
+                        await room_manager.broadcast_bot_response(
+                            room=room,
+                            text=llm_response,
+                            language=user.language,
+                        )
+                else:
+                    await websocket.send_json({"type": "error", "message": "Only the speaker can send messages"})
 
             elif msg_type == "set_mode":
                 # Switch between text_only and text_and_audio at runtime

@@ -28,6 +28,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - PORT=7860
+      - LOG_LEVEL=DEBUG
     volumes:
       - ./prompts:/app/prompts:ro
     networks:
