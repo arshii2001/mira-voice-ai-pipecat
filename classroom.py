@@ -76,7 +76,7 @@ class RoomUser:
     name: str
     language: str  # preferred language code: en, hi, ta, kn
     websocket: WebSocket
-    mode: str = "text_and_audio"  # "text_and_audio" or "text_only"
+    mode: str = "text_only"  # "text_only" or "text_and_audio"
     is_speaker: bool = False
     joined_at: float = field(default_factory=time.time)
 
@@ -1536,9 +1536,9 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
         user_id = data.get("user_id", str(uuid.uuid4())[:8])
         language = data.get("language", "en")
         name = data.get("name", f"User-{user_id[:4]}")
-        mode = data.get("mode", "text_and_audio")  # "text_and_audio" or "text_only"
+        mode = data.get("mode", "text_only")  # "text_only" or "text_and_audio"
         if mode not in ("text_and_audio", "text_only"):
-            mode = "text_and_audio"
+            mode = "text_only"
 
         user = RoomUser(
             user_id=user_id,
@@ -1685,7 +1685,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
 
             elif msg_type == "set_mode":
                 # Switch between text_only and text_and_audio at runtime
-                new_mode = data.get("mode", "text_and_audio")
+                new_mode = data.get("mode", "text_only")
                 if new_mode in ("text_and_audio", "text_only"):
                     user.mode = new_mode
                     await websocket.send_json({"type": "mode_changed", "mode": new_mode})
