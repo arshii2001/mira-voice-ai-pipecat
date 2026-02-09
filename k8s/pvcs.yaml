@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: open-webui-data
+  namespace: mira
+  labels:
+    app.kubernetes.io/part-of: mira
+    app.kubernetes.io/component: frontend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi          # AKS default: Azure Disk CSI
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: classroom-data
+  namespace: mira
+  labels:
+    app.kubernetes.io/part-of: mira
+    app.kubernetes.io/component: voice-backend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 2Gi

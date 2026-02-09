@@ -17,7 +17,16 @@ Tests:
   7. user_disconnect   — Speaker disconnects, token auto-reassigns
   8. broadcast_text    — Unit test: broadcast sends correct translated events
   9. broadcast_modes   — Unit test: text_only users get no audio, text_and_audio do
-  10. speaker_pipeline  — Speaker connects /ws with room_id, listeners receive events
+  10. broadcast_audio   — Unit test: text_and_audio listeners get audio bytes
+  11. teacher_role      — Teacher auto-assignment, lesson actions, student blocking
+  12. hand_raise_flow   — Student raises hand, teacher acknowledges, token passes
+  13. reactions_flow    — Reactions persisted and broadcast
+  14. session_history   — Messages persisted, sessions listed, summary/quiz stored
+  15. topics_dashboard  — Topic suggestions + dashboard stats
+  16. action_tag_unit   — Unit test: regex strips [TEACHER_ACTION:...] tags
+  17. action_tag_text   — Integration: normal question → no tags in LLM response
+  18. action_tag_action — Integration: SET_TOPIC action → clean topic intro, no tags
+  19. speaker_pipeline  — Full pipeline: speaker /ws with room_id, listeners receive events
 
 Usage (inside Docker):
     python tests/test_classroom_mode.py                     # Run all tests
@@ -33,6 +42,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import wave
@@ -1191,6 +1201,189 @@ async def test_speaker_pipeline() -> TestResult:
 
 
 # ═════════════════════════════════════════════════
+# TEST 16: Action Tag Filter — Unit (regex)
+# ═════════════════════════════════════════════════
+async def test_action_tag_filter_unit() -> TestResult:
+    """Unit test: regex strips [TEACHER_ACTION:...] and [TUTOR_ACTION:...] tags from strings."""
+    t0 = time.time()
+    try:
+        from classroom import _ACTION_TAG_RE
+
+        # Case 1: Tag-only string → empty after strip
+        s1 = "[TEACHER_ACTION: SET_TOPIC history]"
+        assert _ACTION_TAG_RE.sub('', s1).strip() == "", f"Expected empty, got: '{_ACTION_TAG_RE.sub('', s1).strip()}'"
+        logger.info("  Tag-only string stripped ✓")
+
+        # Case 2: Tag at beginning of text
+        s2 = "[TEACHER_ACTION: SET_TOPIC history] Today we're covering history."
+        cleaned2 = _ACTION_TAG_RE.sub('', s2).strip()
+        assert "[TEACHER_ACTION" not in cleaned2, f"Tag still present: {cleaned2}"
+        assert "Today" in cleaned2
+        logger.info(f"  Tag at start stripped: '{cleaned2[:50]}' ✓")
+
+        # Case 3: Tag in the middle of text
+        s3 = "Let's discuss [TEACHER_ACTION: NEXT] the water cycle."
+        cleaned3 = _ACTION_TAG_RE.sub('', s3).strip()
+        assert "[TEACHER_ACTION" not in cleaned3
+        assert "water cycle" in cleaned3
+        logger.info(f"  Tag in middle stripped: '{cleaned3[:50]}' ✓")
+
+        # Case 4: TUTOR_ACTION tags
+        s4 = "[TUTOR_ACTION: QUIZ] Here are 3 questions."
+        cleaned4 = _ACTION_TAG_RE.sub('', s4).strip()
+        assert "[TUTOR_ACTION" not in cleaned4
+        assert "3 questions" in cleaned4
+        logger.info(f"  TUTOR_ACTION stripped: '{cleaned4[:50]}' ✓")
+
+        # Case 5: Hindi content with tag
+        s5 = "[TEACHER_ACTION: SET_TOPIC हिस्ट्री]"
+        cleaned5 = _ACTION_TAG_RE.sub('', s5).strip()
+        assert cleaned5 == "", f"Hindi tag not stripped: '{cleaned5}'"
+        logger.info("  Hindi tag stripped ✓")
+
+        # Case 6: Normal text (no tag) should be unchanged
+        s6 = "This is a normal response about history."
+        cleaned6 = _ACTION_TAG_RE.sub('', s6).strip()
+        assert cleaned6 == s6
+        logger.info("  Normal text unchanged ✓")
+
+        # Case 7: Multiple tags
+        s7 = "[TEACHER_ACTION: SET_TOPIC math] [TEACHER_ACTION: NEXT] Algebra is fun."
+        cleaned7 = _ACTION_TAG_RE.sub('', s7).strip()
+        assert "[TEACHER_ACTION" not in cleaned7
+        assert "Algebra" in cleaned7
+        logger.info(f"  Multiple tags stripped: '{cleaned7[:50]}' ✓")
+
+        return TestResult(name="action_tag_filter_unit", passed=True, duration_sec=time.time() - t0)
+
+    except Exception as e:
+        return TestResult(name="action_tag_filter_unit", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 17: Action Tag Filter — Teacher Text Message (integration)
+# ═════════════════════════════════════════════════
+async def test_action_tag_filter_text_message() -> TestResult:
+    """Integration: Teacher sends a normal Hindi question via text_message.
+    Verify the LLM response does NOT contain [TEACHER_ACTION: ...] tags."""
+    t0 = time.time()
+    try:
+        room = await api_create_room("TagFilter Text Msg")
+        room_id = room["room_id"]
+
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        await join_room(ws_teacher, room_id, "teacher-tag1", "Teacher", "en")
+        await drain_messages(ws_teacher, duration=1.5)
+
+        # Request speaker token
+        await ws_teacher.send(json.dumps({"type": "request_token"}))
+        await drain_messages(ws_teacher, duration=1.5)
+
+        # Send a normal question that previously caused the LLM to generate tags
+        await ws_teacher.send(json.dumps({
+            "type": "text_message",
+            "text": "हिस्ट्री के बारे में बात करो।"
+        }))
+
+        # Collect the complete response
+        full_response = ""
+        got_complete = False
+        for _ in range(100):
+            msg = await recv_json_nonbinary(ws_teacher, timeout=15.0)
+            if not msg:
+                break
+            if msg.get("type") == "bot_text":
+                full_response += msg.get("text", "")
+            elif msg.get("type") == "bot_text_complete":
+                full_response = msg.get("text", full_response)
+                got_complete = True
+                break
+
+        # Verify no action tags in response
+        action_tags = re.findall(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):[^\]]*\]', full_response)
+        assert not action_tags, f"Found action tags in response: {action_tags}"
+        assert len(full_response.strip()) > 0, "Response was empty"
+        logger.info(f"  Response ({len(full_response)} chars): '{full_response[:80]}...' ✓")
+        logger.info(f"  No action tags in response ✓")
+
+        await ws_teacher.close()
+        await api_delete_room(room_id)
+
+        return TestResult(
+            name="action_tag_filter_text_message",
+            passed=True,
+            duration_sec=time.time() - t0,
+            details={"response_len": len(full_response), "complete": got_complete},
+        )
+
+    except Exception as e:
+        return TestResult(name="action_tag_filter_text_message", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
+# TEST 18: Action Tag Filter — Teacher Action (integration)
+# ═════════════════════════════════════════════════
+async def test_action_tag_filter_teacher_action() -> TestResult:
+    """Integration: Teacher uses SET_TOPIC toolbar action.
+    Verify the response introduces the topic but does NOT echo raw command tags."""
+    t0 = time.time()
+    try:
+        room = await api_create_room("TagFilter Action")
+        room_id = room["room_id"]
+
+        ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        await join_room(ws_teacher, room_id, "teacher-tag2", "Teacher", "en")
+        await drain_messages(ws_teacher, duration=1.5)
+
+        # Send a teacher action
+        await ws_teacher.send(json.dumps({
+            "type": "teacher_action",
+            "action": "SET_TOPIC",
+            "payload": "the water cycle",
+        }))
+
+        # Collect response (skip lesson_topic_changed, speaker_transcription etc.)
+        full_response = ""
+        got_complete = False
+        for _ in range(100):
+            msg = await recv_json_nonbinary(ws_teacher, timeout=15.0)
+            if not msg:
+                break
+            if msg.get("type") == "bot_text":
+                full_response += msg.get("text", "")
+            elif msg.get("type") == "bot_text_complete":
+                full_response = msg.get("text", full_response)
+                got_complete = True
+                break
+
+        # Verify no action tags
+        action_tags = re.findall(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):[^\]]*\]', full_response)
+        assert not action_tags, f"Found action tags in response: {action_tags}"
+        assert len(full_response.strip()) > 0, "Response was empty"
+
+        # Verify the response is about the topic
+        response_lower = full_response.lower()
+        assert "water" in response_lower or "cycle" in response_lower, \
+            f"Response doesn't mention the topic: '{full_response[:100]}'"
+        logger.info(f"  Response ({len(full_response)} chars): '{full_response[:80]}...' ✓")
+        logger.info(f"  No action tags in response ✓")
+        logger.info(f"  Response mentions water cycle ✓")
+
+        await ws_teacher.close()
+        await api_delete_room(room_id)
+
+        return TestResult(
+            name="action_tag_filter_teacher_action",
+            passed=True,
+            duration_sec=time.time() - t0,
+            details={"response_len": len(full_response), "complete": got_complete},
+        )
+
+    except Exception as e:
+        return TestResult(name="action_tag_filter_teacher_action", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
 # Main
 # ═════════════════════════════════════════════════
 ALL_TESTS = {
@@ -1209,6 +1402,9 @@ ALL_TESTS = {
     "reactions_flow": test_reactions_flow,
     "session_history_and_summary": test_session_history_and_summary,
     "topics_and_dashboard": test_topics_and_dashboard,
+    "action_tag_filter_unit": test_action_tag_filter_unit,
+    "action_tag_filter_text_message": test_action_tag_filter_text_message,
+    "action_tag_filter_teacher_action": test_action_tag_filter_teacher_action,
     "speaker_pipeline": test_speaker_pipeline,
 }
 

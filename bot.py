@@ -23,6 +23,7 @@ mid-speech. This works as follows:
 import asyncio
 import logging
 import os
+import re
 import time
 
 from pipecat.frames.frames import (
@@ -329,6 +330,41 @@ class PipelineInstrumentor(FrameProcessor):
             self._llm_buffer = ""
 
         # Forward the frame downstream
+        await self.push_frame(frame, direction)
+
+
+# Regex to match [TEACHER_ACTION: ...] or [TUTOR_ACTION: ...] tags
+_ACTION_TAG_RE = re.compile(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*', re.IGNORECASE)
+
+
+class ActionTagFilter(FrameProcessor):
+    """
+    Strips [TEACHER_ACTION: ...] and [TUTOR_ACTION: ...] tags from LLM output.
+
+    The LLM sometimes echoes these command tags in its response even though the
+    system prompt says not to. This filter removes them from TextFrames before
+    they reach the text forwarder and TTS, so users never see raw command tags.
+
+    If a TextFrame's entire content is just a tag (nothing left after stripping),
+    the frame is dropped entirely.
+    """
+
+    def __init__(self, name: str = "ActionTagFilter", **kwargs):
+        super().__init__(name=name, **kwargs)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # Must call super() first so StartFrame and other system frames are handled
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TextFrame):
+            cleaned = _ACTION_TAG_RE.sub('', frame.text)
+            if not cleaned.strip():
+                # Entire frame was just a tag — drop it
+                logger.debug(f"[ActionTagFilter] Dropped tag-only frame: '{frame.text}'")
+                return
+            if cleaned != frame.text:
+                logger.info(f"[ActionTagFilter] Stripped tags: '{frame.text}' -> '{cleaned}'")
+                frame.text = cleaned
         await self.push_frame(frame, direction)
 
 
@@ -901,6 +937,9 @@ async def create_bot_pipeline(
     # Create pipeline instrumentor for comprehensive timing diagnostics
     transcript_logger = PipelineInstrumentor(name="PipelineInstrumentor")
 
+    # Filter out any [TEACHER_ACTION: ...] / [TUTOR_ACTION: ...] tags the LLM might generate
+    action_tag_filter = ActionTagFilter(name="ActionTagFilter")
+
     # Create greeting processor to speak welcome message on connection
     greeting_processor = GreetingProcessor(
         greeting_text=GREETING_TEXT,
@@ -943,6 +982,7 @@ async def create_bot_pipeline(
             user_transcript_forwarder,      # 3. Send user transcript to client
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
+            action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
             transcript_logger,              # 6. Log conversation turns
             *extra_processors,              # 7. Optional taps (e.g., classroom)
             greeting_processor,             # 8. Inject greeting on StartFrame
@@ -959,6 +999,7 @@ async def create_bot_pipeline(
             user_transcript_forwarder,      # 3. Send user transcript to client
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
+            action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
             transcript_logger,              # 6. Log conversation turns
             *extra_processors,              # 7. Optional taps (e.g., classroom)
             greeting_processor,             # 8. Inject greeting on StartFrame

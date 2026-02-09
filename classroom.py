@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -59,6 +60,9 @@ from translator import Translator, LANG_NAMES
 from database import db as classroom_db
 
 logger = logging.getLogger(__name__)
+
+# Regex to strip [TEACHER_ACTION: ...] / [TUTOR_ACTION: ...] tags from LLM output
+_ACTION_TAG_RE = re.compile(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*', re.IGNORECASE)
 
 # ─────────────────────────────────────────────────────────────────────
 # Data models
@@ -279,6 +283,12 @@ class RoomManager:
                         })
                     except Exception:
                         break
+
+            # Strip any [TEACHER_ACTION: ...] tags the LLM may have echoed
+            cleaned_response = _ACTION_TAG_RE.sub('', full_response).strip()
+            if cleaned_response != full_response:
+                logger.info(f"[CLASSROOM] Stripped action tags from LLM response: '{full_response[:80]}' -> '{cleaned_response[:80]}'")
+                full_response = cleaned_response
 
             # Send complete response
             try:
