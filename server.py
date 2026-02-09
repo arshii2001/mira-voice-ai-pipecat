@@ -16,10 +16,14 @@ import logging
 import os
 import signal
 from contextlib import asynccontextmanager
+from typing import List, Optional
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from bot import (
     run_bot,
@@ -29,6 +33,7 @@ from bot import (
     LLM_PROVIDER,
     LLM_BASE_URL,
     LLM_MODEL,
+    LLM_API_KEY,
     STT_PROVIDER,
     SONIOX_API_KEY,
     DEEPGRAM_API_KEY,
@@ -104,6 +109,64 @@ async def connect():
 
     protocol = "wss" if use_ssl else "ws"
     return {"ws_url": f"{protocol}://{public_host}:{PORT}/ws"}
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+    model: Optional[str] = None
+    stream: Optional[bool] = True
+
+@app.post("/chat")
+async def chat_completion(req: ChatRequest):
+    """
+    Text chat endpoint — proxies to the same LLM that Pipecat uses for voice.
+    Supports streaming (SSE) so the frontend can show tokens as they arrive.
+    """
+    api_key = LLM_API_KEY
+    base_url = LLM_BASE_URL
+    model = req.model or LLM_MODEL
+
+    # System prompt for Mira tutor mode
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are Mira, a friendly and knowledgeable AI learning companion. "
+            "You help students learn by explaining concepts clearly, using analogies, "
+            "and checking understanding. Be concise but thorough. "
+            "Use simple language and break down complex topics."
+        )
+    }
+
+    messages = [system_msg] + [{"role": m.role, "content": m.content} for m in req.messages]
+
+    if req.stream:
+        async def generate():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    json={"model": model, "messages": messages, "stream": True},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            yield line + "\n\n"
+                        elif line == "":
+                            continue
+
+        return StreamingResponse(generate(), media_type="text/event-stream")
+    else:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                json={"model": model, "messages": messages, "stream": False},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            return resp.json()
 
 
 @app.get("/config")

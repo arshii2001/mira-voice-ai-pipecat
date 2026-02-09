@@ -58,7 +58,7 @@ services:
     environment:
       # Pipecat Voice Integration
       - PIPECAT_ENABLED=true
-      - PIPECAT_API_URL=http://mira-voice:7860
+      - PIPECAT_API_URL=http://localhost:7860
       - PIPECAT_CONNECTION_MODE=websocket
       
       # Disable auth for local testing
