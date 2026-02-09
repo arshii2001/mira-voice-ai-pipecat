@@ -356,6 +356,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
         extra_processors = None
         classroom_system_prompt = config.get("system_prompt")
+        skip_greeting = False
+        context_messages = config.get("context")
+
         if room_id:
             room = room_manager.get_room(room_id)
             if not room:
@@ -375,13 +378,23 @@ async def websocket_endpoint(websocket: WebSocket):
             classroom_system_prompt = room_manager._get_co_teaching_prompt(room)
             logger.info(f"[CLASSROOM] Attached broadcaster for room {room_id} (speaker={speaker_id}) with co-teaching prompt")
 
+            # If room has conversation history, seed the pipeline with it and skip greeting
+            if room.conversation_history:
+                context_messages = list(room.conversation_history)  # Copy to avoid mutation
+                skip_greeting = True
+                logger.info(
+                    f"[CLASSROOM] Seeding pipeline with {len(context_messages)} prior messages "
+                    f"from room {room_id} (skipping greeting)"
+                )
+
         await run_bot(
             websocket=websocket,
             system_prompt=classroom_system_prompt,
-            context_messages=config.get("context"),
+            context_messages=context_messages,
             mode=config.get("mode", "text_and_audio"),
             extra_processors=extra_processors,
             session_id=session_id,
+            skip_greeting=skip_greeting,
         )
     except WebSocketDisconnect:
         logger.info("Client disconnected")

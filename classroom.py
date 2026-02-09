@@ -96,6 +96,10 @@ class Room:
     teacher_id: Optional[str] = None  # Room creator = teacher
     current_lesson_topic: Optional[str] = None  # Current lesson topic set by teacher
     conversation_history: List[dict] = field(default_factory=list)  # [{role, content}] for LLM context
+    # ── Reconnect support ──
+    _disconnected_users: Dict[str, dict] = field(default_factory=dict)  # user_id -> {name, language, mode, is_speaker, disconnected_at}
+    _speaker_grace_task: Optional[asyncio.Task] = None  # Pending speaker reassignment
+    _grace_speaker_id: Optional[str] = None  # Speaker ID held during grace period
 
 
     def to_dict(self) -> dict:
@@ -237,9 +241,107 @@ class RoomManager:
             "if asked in English, respond in English.\n"
         )
 
-    async def ask_llm(self, question: str, speaker_ws: WebSocket, room: Optional["Room"] = None) -> Optional[str]:
-        """Send a text question to the LLM, stream tokens to speaker, return full response.
-        Maintains conversation history per room for context continuity."""
+    # Sentence boundary pattern for chunked streaming to listeners
+    _SENTENCE_RE = re.compile(r'(?<=[.!?।\n])\s+')
+
+    async def _stream_sentence_to_listeners(
+        self,
+        room: Room,
+        sentence: str,
+        source_lang: str,
+        is_final: bool = False,
+    ):
+        """Translate + send a sentence chunk to all listeners in parallel.
+
+        Same-language text_only listeners get the raw text immediately.
+        Different-language listeners get translated text.
+        Audio listeners additionally get TTS for the chunk.
+        """
+        if not sentence.strip():
+            return
+
+        tasks = []
+        # Snapshot users to avoid "dictionary changed size during iteration"
+        listeners = [u for u in list(room.users.values()) if u.user_id != room.speaker_id]
+        for user in listeners:
+            tasks.append(
+                self._deliver_sentence_to_listener(user, sentence, source_lang, is_final)
+            )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _deliver_sentence_to_listener(
+        self,
+        user: RoomUser,
+        sentence: str,
+        source_lang: str,
+        is_final: bool,
+    ):
+        """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode)."""
+        try:
+            # Translate if different language
+            if user.language != source_lang and self._translator:
+                translated = await self._translator.translate(
+                    text=sentence,
+                    target_lang=user.language,
+                    source_lang=source_lang,
+                )
+            else:
+                translated = sentence
+
+            # Send streamed text chunk
+            await self._send_json(user.websocket, {
+                "type": "bot_text",
+                "text": translated,
+                "streaming": True,
+                "translated": user.language != source_lang,
+                "target_language": user.language,
+            })
+            logger.info(
+                f"[CLASSROOM] deliver_sentence | user={user.name}({user.language}) "
+                f"| mode={user.mode} | text_len={len(translated)} | final={is_final}"
+            )
+
+            # TTS for audio-mode listeners
+            if self._tts and user.mode == "text_and_audio":
+                await self._send_json(user.websocket, {"type": "bot_audio_start"})
+                audio_bytes = 0
+                try:
+                    async for frame in self._tts.run_tts(translated):
+                        if hasattr(frame, "audio") and frame.audio:
+                            await self._send_bytes(user.websocket, frame.audio)
+                            audio_bytes += len(frame.audio)
+                except Exception as tts_err:
+                    logger.warning(f"[CLASSROOM] Sentence TTS error for {user.name}: {tts_err}")
+                await self._send_json(user.websocket, {"type": "bot_audio_end"})
+                logger.info(
+                    f"[CLASSROOM] deliver_sentence_audio | user={user.name}({user.language}) "
+                    f"| audio={audio_bytes}B | text='{translated[:40]}'"
+                )
+            elif not self._tts and user.mode == "text_and_audio":
+                logger.warning(f"[CLASSROOM] No TTS available for audio-mode listener {user.name}")
+
+        except Exception as e:
+            logger.warning(f"[CLASSROOM] Failed to deliver sentence to {user.name}: {e}")
+
+    async def ask_llm(
+        self,
+        question: str,
+        speaker_ws: WebSocket,
+        room: Optional["Room"] = None,
+        stream_to_listeners: bool = True,
+    ) -> Optional[str]:
+        """Send a text question to the LLM, stream tokens to speaker AND listeners.
+
+        Speaker gets every token as it arrives (bot_text).
+        Listeners get sentence-by-sentence delivery:
+          - Same-language text_only: translated text chunk per sentence
+          - Different-language: translated chunk per sentence
+          - Audio mode: translated chunk + TTS per sentence
+
+        When stream_to_listeners=False, behaves like before (speaker only).
+        Maintains conversation history per room for context continuity.
+        """
         if not self._llm_client:
             try:
                 await speaker_ws.send_json({"type": "error", "message": "LLM not configured"})
@@ -252,6 +354,9 @@ class RoomManager:
 
         t0 = time.time()
         full_response = ""
+        sentence_buffer = ""  # Accumulates tokens until a sentence boundary
+        pending_listener_tasks: list[asyncio.Task] = []
+        source_lang = "en"  # LLM responds in the language of the question; default en
 
         # Build messages with conversation history for context
         messages = [{"role": "system", "content": system_prompt}]
@@ -259,6 +364,10 @@ class RoomManager:
             # Include last 20 messages for context
             messages.extend(room.conversation_history[-20:])
         messages.append({"role": "user", "content": question})
+
+        # Detect source language from the question (simple heuristic: check room speaker's lang)
+        if room and room.speaker_id and room.speaker_id in room.users:
+            source_lang = room.users[room.speaker_id].language
 
         try:
             stream = await self._llm_client.chat.completions.create(
@@ -274,7 +383,9 @@ class RoomManager:
                 if delta and delta.content:
                     token = delta.content
                     full_response += token
-                    # Stream each token to the speaker
+                    sentence_buffer += token
+
+                    # Stream each token to the speaker immediately
                     try:
                         await speaker_ws.send_json({
                             "type": "bot_text",
@@ -284,13 +395,38 @@ class RoomManager:
                     except Exception:
                         break
 
+                    # Check for sentence boundary — dispatch to listeners
+                    if stream_to_listeners and room and self._SENTENCE_RE.search(sentence_buffer):
+                        # Split on the last sentence boundary
+                        parts = self._SENTENCE_RE.split(sentence_buffer)
+                        # Send all complete sentences, keep the remainder
+                        complete = " ".join(parts[:-1]).strip()
+                        sentence_buffer = parts[-1] if len(parts) > 1 else ""
+
+                        if complete:
+                            task = asyncio.create_task(
+                                self._stream_sentence_to_listeners(
+                                    room, complete, source_lang, is_final=False,
+                                )
+                            )
+                            pending_listener_tasks.append(task)
+
+            # Flush remaining sentence buffer to listeners
+            if stream_to_listeners and room and sentence_buffer.strip():
+                task = asyncio.create_task(
+                    self._stream_sentence_to_listeners(
+                        room, sentence_buffer.strip(), source_lang, is_final=True,
+                    )
+                )
+                pending_listener_tasks.append(task)
+
             # Strip any [TEACHER_ACTION: ...] tags the LLM may have echoed
             cleaned_response = _ACTION_TAG_RE.sub('', full_response).strip()
             if cleaned_response != full_response:
                 logger.info(f"[CLASSROOM] Stripped action tags from LLM response: '{full_response[:80]}' -> '{cleaned_response[:80]}'")
                 full_response = cleaned_response
 
-            # Send complete response
+            # Send complete response to speaker
             try:
                 await speaker_ws.send_json({
                     "type": "bot_text_complete",
@@ -298,6 +434,25 @@ class RoomManager:
                 })
             except Exception:
                 pass
+
+            # Wait for all listener delivery tasks to finish
+            if pending_listener_tasks:
+                await asyncio.gather(*pending_listener_tasks, return_exceptions=True)
+
+            # Signal listeners that streaming is done (lightweight, no re-translation)
+            if stream_to_listeners and room:
+                await self._broadcast_json(room, {
+                    "type": "bot_text_complete",
+                    "text": "",  # Listeners already have the full text from streamed chunks
+                }, exclude=room.speaker_id)
+
+                # Persist bot response to DB
+                asyncio.create_task(
+                    self.save_message_to_db(
+                        room=room, role="assistant", content=full_response,
+                        speaker_name="Mira", original_language=source_lang,
+                    )
+                )
 
             # Update conversation history for context continuity
             if room:
@@ -310,6 +465,7 @@ class RoomManager:
             latency_ms = round((time.time() - t0) * 1000, 1)
             logger.info(
                 f"[CLASSROOM] LLM text query | latency={latency_ms}ms | "
+                f"listeners_streamed={len(pending_listener_tasks)} chunks | "
                 f"q='{question[:50]}' | a='{full_response[:50]}'"
             )
             return full_response
@@ -619,7 +775,7 @@ class RoomManager:
 
     async def add_user(self, room_id: str, user: RoomUser) -> bool:
         """
-        Add a user to a room.
+        Add a user to a room (or reconnect an existing user).
 
         Returns True on success. The caller is responsible for sending the
         'joined' response BEFORE calling finalize_join() so that the user
@@ -629,11 +785,34 @@ class RoomManager:
         if not room:
             return False
 
+        # Check if this is a reconnecting user
+        is_reconnect = user.user_id in room._disconnected_users
+        prev_state = room._disconnected_users.pop(user.user_id, None)
+
+        if is_reconnect and prev_state:
+            was_speaker = prev_state.get("is_speaker", False)
+            logger.info(
+                f"[CLASSROOM] User {user.name} ({user.user_id}) RECONNECTED to room {room_id} "
+                f"[lang={user.language}] (was_speaker={was_speaker})"
+            )
+
+            # If they were the speaker and grace period is still active, restore speaker role
+            if was_speaker and room._grace_speaker_id == user.user_id:
+                # Cancel grace timeout
+                if room._speaker_grace_task and not room._speaker_grace_task.done():
+                    room._speaker_grace_task.cancel()
+                room._grace_speaker_id = None
+                room._speaker_grace_task = None
+                user.is_speaker = True
+                room.speaker_id = user.user_id
+                logger.info(f"[CLASSROOM] Speaker role RESTORED for {user.name} ({user.user_id})")
+        else:
+            logger.info(
+                f"[CLASSROOM] User {user.name} ({user.user_id}) joined room {room_id} "
+                f"[lang={user.language}]"
+            )
+
         room.users[user.user_id] = user
-        logger.info(
-            f"[CLASSROOM] User {user.name} ({user.user_id}) joined room {room_id} "
-            f"[lang={user.language}]"
-        )
 
         # Ensure DB session exists
         asyncio.create_task(self._ensure_session(room))
@@ -668,26 +847,54 @@ class RoomManager:
         """
         Called after the 'joined' response is sent to the user.
         Handles auto-assignment of speaker token for the first user or teacher.
+        Skips if the user already has the speaker role (reconnect case).
         """
         room = self.get_room(room_id)
         if not room:
             return
 
-        # If this is the teacher joining and no one is speaking, give them the token
-        if user_id == room.teacher_id and room.speaker_id is None:
+        # If speaker role was already restored during reconnect, just notify
+        if room.speaker_id == user_id:
+            # Notify all users about the (restored) speaker
+            await self._broadcast_json(room, {
+                "type": "token_changed",
+                "speaker_id": user_id,
+                "speaker_name": room.users[user_id].name if user_id in room.users else None,
+            })
+            return
+
+        # Determine if there is an *active* speaker (connected user with the token).
+        # A speaker_id pointing to a disconnected user (in grace period) does NOT
+        # count as an active speaker — new joiners should be able to get the token.
+        active_speaker = (
+            room.speaker_id is not None and room.speaker_id in room.users
+        )
+
+        # If this is the teacher joining and no one is actively speaking, give them the token
+        if user_id == room.teacher_id and not active_speaker:
             await self._assign_token(room, user_id)
         # If first user, auto-assign speaker token
-        elif len(room.users) == 1 and room.speaker_id is None:
+        elif len(room.users) == 1 and not active_speaker:
             await self._assign_token(room, user_id)
 
     async def remove_user(self, room_id: str, user_id: str):
-        """Remove a user from a room."""
+        """Remove a user from a room (with grace period for reconnects)."""
         room = self.get_room(room_id)
         if not room or user_id not in room.users:
             return
 
         user = room.users.pop(user_id)
-        logger.info(f"[CLASSROOM] User {user.name} ({user_id}) left room {room_id}")
+        was_speaker = room.speaker_id == user_id
+        logger.info(f"[CLASSROOM] User {user.name} ({user_id}) disconnected from room {room_id} (was_speaker={was_speaker})")
+
+        # Save disconnected user state for potential reconnect
+        room._disconnected_users[user_id] = {
+            "name": user.name,
+            "language": user.language,
+            "mode": user.mode,
+            "is_speaker": was_speaker,
+            "disconnected_at": time.time(),
+        }
 
         # Remove from token queue
         if user_id in room.token_queue:
@@ -697,24 +904,53 @@ class RoomManager:
         room.hand_raises = [hr for hr in room.hand_raises
                             if hr["user_id"] != user_id]
 
-        # If speaker left, pass token
-        if room.speaker_id == user_id:
-            room.speaker_id = None
-            # Auto-assign to next in queue or first remaining user
-            if room.users:
-                next_speaker = room.token_queue.pop(0) if room.token_queue else next(iter(room.users))
-                await self._assign_token(room, next_speaker)
+        # If speaker left, start grace period before reassigning
+        if was_speaker:
+            room._grace_speaker_id = user_id
+            # Cancel any existing grace task
+            if room._speaker_grace_task and not room._speaker_grace_task.done():
+                room._speaker_grace_task.cancel()
+            room._speaker_grace_task = asyncio.create_task(
+                self._speaker_grace_timeout(room, user_id)
+            )
+            logger.info(f"[CLASSROOM] Speaker {user.name} disconnected — 30s grace period started")
 
-        # Notify others
+        # Notify others (user_disconnected, not user_left — they may come back)
         await self._broadcast_json(room, {
             "type": "user_left",
             "user_id": user_id,
         })
 
-        # Clean up empty rooms — end DB session
-        if not room.users:
+        # Don't delete room during grace period — check after grace expires
+        if not room.users and not room._grace_speaker_id:
             await self._end_session(room)
             self.delete_room(room_id)
+
+    async def _speaker_grace_timeout(self, room: Room, user_id: str):
+        """After grace period, if speaker hasn't reconnected, reassign token."""
+        try:
+            await asyncio.sleep(30)  # 30-second grace period
+        except asyncio.CancelledError:
+            logger.info(f"[CLASSROOM] Grace period cancelled for {user_id} (reconnected)")
+            return
+
+        # Grace period expired — check if user reconnected
+        if room._grace_speaker_id == user_id:
+            room._grace_speaker_id = None
+            room.speaker_id = None
+            logger.info(f"[CLASSROOM] Grace period expired for {user_id} — reassigning speaker token")
+
+            # Clean up disconnected user record
+            room._disconnected_users.pop(user_id, None)
+
+            # Assign to next available user
+            if room.users:
+                next_speaker = room.token_queue.pop(0) if room.token_queue else next(iter(room.users))
+                await self._assign_token(room, next_speaker)
+            elif not room.users:
+                # Room is empty now
+                await self._end_session(room)
+                self.delete_room(room.room_id)
 
     # ── Speaker token ──
 
@@ -826,7 +1062,7 @@ class RoomManager:
 
         # Translate + send to each listener in their language (parallel)
         tasks = []
-        for user in room.users.values():
+        for user in list(room.users.values()):
             if user.user_id == speaker_id:
                 continue
             listener_count += 1
@@ -873,7 +1109,7 @@ class RoomManager:
         listener_count = 0
 
         tasks = []
-        for user in room.users.values():
+        for user in list(room.users.values()):
             if user.user_id == room.speaker_id:
                 continue
             listener_count += 1
@@ -1012,7 +1248,7 @@ class RoomManager:
     async def _broadcast_json(self, room: Room, data: dict, exclude: str = None):
         """Send JSON to all users in a room."""
         tasks = []
-        for user in room.users.values():
+        for user in list(room.users.values()):
             if user.user_id != exclude:
                 tasks.append(self._send_json(user.websocket, data))
         if tasks:
@@ -1368,7 +1604,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                 await room_manager.release_token(room_id, user.user_id)
 
             elif msg_type == "text_message":
-                # Speaker typed a text question — query LLM, stream to speaker, broadcast to listeners
+                # Speaker typed a text question — query LLM, stream to speaker AND listeners
                 text = data.get("text", "").strip()
                 room = room_manager.get_room(room_id)
                 if text and room and room.speaker_id == user.user_id:
@@ -1382,16 +1618,11 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                         language=user.language,
                     )
 
-                    # 2. Query LLM — streams tokens to speaker via bot_text / bot_text_complete
-                    llm_response = await room_manager.ask_llm(text, websocket, room=room)
-
-                    # 3. Broadcast Mira's response to listeners (translated)
-                    if llm_response:
-                        await room_manager.broadcast_bot_response(
-                            room=room,
-                            text=llm_response,
-                            language=user.language,
-                        )
+                    # 2. Query LLM — streams tokens to speaker AND listeners sentence-by-sentence
+                    #    (ask_llm handles listener delivery inline, no separate broadcast needed)
+                    await room_manager.ask_llm(
+                        text, websocket, room=room, stream_to_listeners=True,
+                    )
                 else:
                     await websocket.send_json({"type": "error", "message": "Only the speaker can send messages"})
 
@@ -1447,15 +1678,10 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     language="en",
                 )
 
-                # Query LLM with the teacher command (don't show command to students)
-                llm_response = await room_manager.ask_llm(teacher_cmd, websocket, room=room)
-
-                if llm_response:
-                    await room_manager.broadcast_bot_response(
-                        room=room,
-                        text=llm_response,
-                        language=user.language,
-                    )
+                # Query LLM with the teacher command — streams to speaker AND listeners
+                await room_manager.ask_llm(
+                    teacher_cmd, websocket, room=room, stream_to_listeners=True,
+                )
 
             elif msg_type == "set_mode":
                 # Switch between text_only and text_and_audio at runtime

@@ -33,9 +33,9 @@ k8s/
 !prompts/*.md
 LICENSE
 
-# Tests (not needed in production image)
-tests/
+# Examples (not needed in any image)
 examples/
+# Note: tests/ is NOT excluded because tests/Dockerfile uses project root as build context
 
 # Misc
 *.log

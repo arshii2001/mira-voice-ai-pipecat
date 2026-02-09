@@ -608,19 +608,25 @@ class GreetingProcessor(FrameProcessor):
     """
     Processor that speaks a greeting when the pipeline starts.
     Injects a TTSSpeakFrame on StartFrame which flows to TTS for synthesis.
+    Can be skipped for reconnects where the room already has conversation history.
     """
 
-    def __init__(self, greeting_text: str, name: str = "GreetingProcessor", **kwargs):
+    def __init__(self, greeting_text: str, name: str = "GreetingProcessor", skip: bool = False, **kwargs):
         super().__init__(name=name, **kwargs)
         self._greeting_text = greeting_text
         self._greeting_spoken = False
+        self._skip = skip
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        # On StartFrame, inject greeting text for TTS
+        # On StartFrame, inject greeting text for TTS (unless skipped)
         if isinstance(frame, StartFrame) and not self._greeting_spoken:
             self._greeting_spoken = True
+            if self._skip:
+                logger.info("[GREETING] Skipped (reconnect with existing conversation)")
+                await self.push_frame(frame, direction)
+                return
             # Push StartFrame FIRST so TTS initializes before receiving text
             await self.push_frame(frame, direction)
             # Short delay for ElevenLabs WebSocket handshake
@@ -835,6 +841,7 @@ async def create_bot_pipeline(
     mode: str = "text_and_audio",
     extra_processors: list = None,
     session_id: str = None,
+    skip_greeting: bool = False,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
@@ -847,6 +854,7 @@ async def create_bot_pipeline(
               is skipped entirely and LLM text is forwarded to the client as JSON.
         extra_processors: Optional list of FrameProcessors to insert into the pipeline
               after instrumentation (e.g., classroom broadcaster taps).
+        skip_greeting: If True, skip the greeting message (for reconnects with history).
 
     Returns:
         Tuple of (PipelineTask, PipelineRunner, Transport)
@@ -922,6 +930,7 @@ async def create_bot_pipeline(
     messages.append({"role": "assistant", "content": GREETING_TEXT})
     if context_messages:
         messages.extend(context_messages)
+        logger.info(f"[PIPELINE] Seeded LLM context with {len(context_messages)} prior messages")
 
     context = LLMContext(messages=messages, tools=tools)
 
@@ -941,10 +950,14 @@ async def create_bot_pipeline(
     action_tag_filter = ActionTagFilter(name="ActionTagFilter")
 
     # Create greeting processor to speak welcome message on connection
+    # Skip greeting on reconnects (room already has conversation history)
     greeting_processor = GreetingProcessor(
         greeting_text=GREETING_TEXT,
         name="GreetingProcessor",
+        skip=skip_greeting,
     )
+    if skip_greeting:
+        logger.info("[PIPELINE] Greeting will be skipped (reconnect with history)")
 
     # TextStreamForwarder sends LLM text as JSON to client in BOTH modes
     text_forwarder = TextStreamForwarder(
@@ -1031,6 +1044,7 @@ async def run_bot(
     mode: str = "text_and_audio",
     extra_processors: list = None,
     session_id: str = None,
+    skip_greeting: bool = False,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -1041,6 +1055,7 @@ async def run_bot(
         context_messages: Prior conversation context
         mode: "text_and_audio" (default) or "text_only"
         session_id: Unique session ID for text injection support
+        skip_greeting: If True, skip the greeting message (for reconnects)
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
@@ -1049,6 +1064,7 @@ async def run_bot(
         mode=mode,
         extra_processors=extra_processors,
         session_id=session_id,
+        skip_greeting=skip_greeting,
     )
 
     # Add transport event handlers for proper RTVI protocol support

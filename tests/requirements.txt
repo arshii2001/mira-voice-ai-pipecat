@@ -2,3 +2,9 @@
 pipecat-ai[websocket]==0.0.98
 websockets==14.0
 numpy==1.26.4
+aiohttp>=3.9.0
+# Dependencies for unit tests that import server modules (classroom, database, translator)
+starlette>=0.37.0
+aiosqlite>=0.20.0
+openai>=1.0.0
+fastapi>=0.110.0

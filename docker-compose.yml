@@ -92,11 +92,13 @@ services:
   # Or:       docker compose run --rm test-voice --test bargein --verbose
   test-voice:
     build:
-      context: ./tests
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: tests/Dockerfile
     container_name: mira-test-voice
     environment:
       - PIPECAT_WS_URL=ws://mira-voice:7860/ws
+      - PIPECAT_HTTP_URL=http://mira-voice:7860
+      - CLASSROOM_WS_URL=ws://mira-voice:7860/classroom/rooms
     networks:
       - mira-network
     depends_on:
