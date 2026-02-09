@@ -457,6 +457,117 @@ class UserTranscriptForwarder(FrameProcessor):
             await self.push_frame(frame, direction)
 
 
+class TextInputInjector(FrameProcessor):
+    """
+    Allows text to be injected into a running voice pipeline.
+
+    When a user types text while voice mode is active, this processor
+    receives the text via an asyncio.Queue and emits TranscriptionFrame(s)
+    downstream, simulating speech input. The LLM then processes it and
+    TTS speaks the response — giving the user a hybrid text-input / voice-output
+    experience.
+
+    The injector runs a background task that polls its queue and pushes
+    frames downstream through the pipeline.
+    """
+
+    def __init__(self, session_id: str, websocket=None, name: str = "TextInputInjector", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self._session_id = session_id
+        self._websocket = websocket
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._running = False
+        self._task: asyncio.Task | None = None
+
+    async def inject_text(self, text: str):
+        """Put text into the injection queue."""
+        logger.info(f"[TEXT_INJECT] Queuing text for session {self._session_id}: '{text[:80]}'")
+        await self._queue.put(text)
+
+    async def _poll_loop(self):
+        """Background task that drains the queue and pushes TranscriptionFrames."""
+        self._running = True
+        logger.info(f"[TEXT_INJECT] Poll loop started for session {self._session_id}")
+        while self._running:
+            try:
+                text = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+                if text is None:
+                    break  # Sentinel to stop
+
+                logger.info(f"[TEXT_INJECT] Injecting text as transcription: '{text[:80]}'")
+
+                # Send user_transcript to the client so the frontend shows the text
+                if self._websocket:
+                    try:
+                        await self._websocket.send_json({
+                            "type": "user_transcript",
+                            "text": text,
+                            "final": True,
+                        })
+                    except Exception as e:
+                        logger.warning(f"[TEXT_INJECT] Failed to send user_transcript: {e}")
+
+                # Simulate the STT output: UserStartedSpeaking -> Transcription -> UserStoppedSpeaking
+                # This triggers the LLM context aggregator properly
+                await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+                await self.push_frame(
+                    TranscriptionFrame(text=text, user_id="typed", timestamp=""),
+                    FrameDirection.DOWNSTREAM,
+                )
+                await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[TEXT_INJECT] Poll loop error: {e}")
+
+        logger.info(f"[TEXT_INJECT] Poll loop ended for session {self._session_id}")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        # Start background poll loop on the first StartFrame
+        if isinstance(frame, StartFrame) and not self._task:
+            self._task = asyncio.create_task(self._poll_loop())
+
+        await self.push_frame(frame, direction)
+
+    async def cleanup(self):
+        """Stop the background task."""
+        self._running = False
+        if self._task:
+            await self._queue.put(None)  # sentinel
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+
+# ── Global registry of active text injectors (keyed by session_id) ──
+_active_text_injectors: dict[str, TextInputInjector] = {}
+
+
+def register_text_injector(session_id: str, injector: TextInputInjector):
+    """Register a text injector for the given session."""
+    _active_text_injectors[session_id] = injector
+    logger.info(f"[TEXT_INJECT] Registered injector for session {session_id}")
+
+
+def unregister_text_injector(session_id: str):
+    """Remove a text injector when the session ends."""
+    _active_text_injectors.pop(session_id, None)
+    logger.info(f"[TEXT_INJECT] Unregistered injector for session {session_id}")
+
+
+def get_text_injector(session_id: str) -> TextInputInjector | None:
+    """Look up the active text injector for a session."""
+    return _active_text_injectors.get(session_id)
+
+
 class GreetingProcessor(FrameProcessor):
     """
     Processor that speaks a greeting when the pipeline starts.
@@ -687,6 +798,7 @@ async def create_bot_pipeline(
     context_messages: list = None,
     mode: str = "text_and_audio",
     extra_processors: list = None,
+    session_id: str = None,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
@@ -808,13 +920,26 @@ async def create_bot_pipeline(
         name="UserTranscriptForwarder",
     )
 
+    # TextInputInjector allows typed text to be injected into the voice pipeline
+    text_injector = None
+    if session_id:
+        text_injector = TextInputInjector(
+            session_id=session_id,
+            websocket=websocket,
+            name="TextInputInjector",
+        )
+        register_text_injector(session_id, text_injector)
+
     # Build pipeline
     extra_processors = extra_processors or []
+    # Insert text injector after STT, before user_transcript_forwarder
+    injector_list = [text_injector] if text_injector else []
     if text_only:
         logger.info("[PIPELINE] text_only mode: TTS skipped, text streamed via JSON")
         pipeline = Pipeline([
             transport.input(),              # 1. Receive audio from client
             stt,                            # 2. Speech-to-text
+            *injector_list,                 # 2b. Text injection point (typed text)
             user_transcript_forwarder,      # 3. Send user transcript to client
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
@@ -830,6 +955,7 @@ async def create_bot_pipeline(
         pipeline = Pipeline([
             transport.input(),              # 1. Receive audio from client
             stt,                            # 2. Speech-to-text
+            *injector_list,                 # 2b. Text injection point (typed text)
             user_transcript_forwarder,      # 3. Send user transcript to client
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
@@ -863,6 +989,7 @@ async def run_bot(
     context_messages: list = None,
     mode: str = "text_and_audio",
     extra_processors: list = None,
+    session_id: str = None,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -872,6 +999,7 @@ async def run_bot(
         system_prompt: Custom system prompt (defaults to prompts/v0.md)
         context_messages: Prior conversation context
         mode: "text_and_audio" (default) or "text_only"
+        session_id: Unique session ID for text injection support
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
@@ -879,6 +1007,7 @@ async def run_bot(
         context_messages=context_messages,
         mode=mode,
         extra_processors=extra_processors,
+        session_id=session_id,
     )
 
     # Add transport event handlers for proper RTVI protocol support
@@ -897,4 +1026,10 @@ async def run_bot(
         logger.error(f"Bot error: {e}")
         raise
     finally:
+        # Clean up text injector
+        if session_id:
+            injector = get_text_injector(session_id)
+            if injector:
+                await injector.cleanup()
+            unregister_text_injector(session_id)
         logger.info("Bot session ended")

@@ -15,18 +15,20 @@ import json
 import logging
 import os
 import signal
+import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from bot import (
     run_bot,
+    get_text_injector,
     DEFAULT_LANGUAGE,
     DEFAULT_VOICE,
     TTS_WS_URL,
@@ -335,8 +337,18 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection accepted")
 
+    # Generate a unique session ID for text injection support
+    session_id = str(uuid.uuid4())
+
     # Wait for optional config message
     config = await receive_client_config(websocket, timeout=1.0)
+
+    # Send session_id to the client so it can use /inject_text
+    try:
+        await websocket.send_json({"type": "session_id", "session_id": session_id})
+        logger.info(f"Sent session_id to client: {session_id}")
+    except Exception as e:
+        logger.warning(f"Failed to send session_id: {e}")
 
     try:
         room_id = config.get("room_id")
@@ -369,11 +381,39 @@ async def websocket_endpoint(websocket: WebSocket):
             context_messages=config.get("context"),
             mode=config.get("mode", "text_and_audio"),
             extra_processors=extra_processors,
+            session_id=session_id,
         )
     except WebSocketDisconnect:
         logger.info("Client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+
+
+class InjectTextRequest(BaseModel):
+    session_id: str
+    text: str
+
+
+@app.post("/inject_text")
+async def inject_text(req: InjectTextRequest):
+    """
+    Inject typed text into an active voice pipeline session.
+
+    When a user types text while voice mode is active, the frontend sends
+    the text here instead of the /chat endpoint. The text is injected into
+    the running Pipecat pipeline as a TranscriptionFrame, so the LLM
+    processes it and TTS speaks the response back.
+    """
+    injector = get_text_injector(req.session_id)
+    if not injector:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active voice session found for session_id: {req.session_id}"
+        )
+
+    await injector.inject_text(req.text)
+    logger.info(f"[INJECT_TEXT] Text injected for session {req.session_id}: '{req.text[:80]}'")
+    return {"status": "ok", "session_id": req.session_id}
 
 
 @app.get("/voices")
