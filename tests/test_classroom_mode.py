@@ -1836,6 +1836,208 @@ async def test_three_clients_e2e() -> TestResult:
 
 
 # ═════════════════════════════════════════════════
+# TEST: Metrics endpoint — tutor vs classroom, speaker vs listener
+# ═════════════════════════════════════════════════
+async def test_metrics_endpoint() -> TestResult:
+    """
+    Exercises all four metrics buckets and verifies /metrics structure:
+      1. Tutor text  — POST /chat (non-streaming + streaming)
+      2. Tutor voice — connect to /ws without room_id (session only, no actual speech)
+      3. Classroom speaker — join default room, send text_message, get bot response
+      4. Classroom listener — Hindi listener receives translated bot_text chunks
+
+    Then fetches GET /metrics and validates the separated structure.
+    """
+    t0 = time.time()
+    try:
+        # ── Step 0: Read baseline metrics ──
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HTTP_URL}/metrics") as resp:
+                assert resp.status == 200, f"/metrics returned {resp.status}"
+                baseline = await resp.json()
+        logger.info(f"  0. Baseline metrics fetched (uptime={baseline['uptime_seconds']}s)")
+
+        # ── Step 1: Tutor text — non-streaming ──
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{HTTP_URL}/chat",
+                json={"messages": [{"role": "user", "content": "What is 2+2? One word."}], "stream": False},
+            ) as resp:
+                assert resp.status == 200, f"/chat sync failed: {resp.status}"
+                body = await resp.json()
+                answer = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+                logger.info(f"  1a. Tutor text (sync): '{answer[:60]}'")
+
+        # ── Step 1b: Tutor text — streaming ──
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{HTTP_URL}/chat",
+                json={"messages": [{"role": "user", "content": "What is gravity? One sentence."}], "stream": True},
+            ) as resp:
+                assert resp.status == 200, f"/chat stream failed: {resp.status}"
+                sse_lines = []
+                async for line in resp.content:
+                    decoded = line.decode().strip()
+                    if decoded.startswith("data: "):
+                        sse_lines.append(decoded)
+                logger.info(f"  1b. Tutor text (stream): {len(sse_lines)} SSE events")
+
+        # ── Step 2: Tutor voice — connect/disconnect (no speech) ──
+        voice_ws = await websockets.connect(WS_URL)
+        await voice_ws.send(json.dumps({"type": "config"}))
+        session_msg = await recv_json_nonbinary(voice_ws, timeout=10)
+        assert session_msg and session_msg.get("type") == "session_id", \
+            f"Expected session_id, got {session_msg}"
+        logger.info(f"  2. Tutor voice session: {session_msg.get('session_id', '')[:8]}...")
+        await asyncio.sleep(1)
+        await voice_ws.close()
+        await asyncio.sleep(1)
+
+        # ── Step 3: Classroom speaker text query ──
+        room_id = "default"
+        ws_speaker = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        joined = await join_room(ws_speaker, room_id, "metrics-speaker", "MetricsSpeaker", "en")
+        assert joined, "Speaker did not join"
+        token_msg = await wait_for_message_type(ws_speaker, "token_changed", timeout=5)
+        assert token_msg, "Speaker did not receive token"
+        logger.info(f"  3a. Speaker joined with token")
+
+        await ws_speaker.send(json.dumps({"type": "text_message", "text": "What is 7+3? Brief."}))
+        speaker_complete = await wait_for_message_type(ws_speaker, "bot_text_complete", timeout=15)
+        assert speaker_complete, "Speaker did not receive bot_text_complete"
+        speaker_answer = speaker_complete.get("text", "")
+        logger.info(f"  3b. Speaker response: '{speaker_answer[:60]}'")
+
+        # ── Step 4: Add Hindi listener, send another query ──
+        ws_listener = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
+        await join_room(ws_listener, room_id, "metrics-listener", "HindiListener", "hi")
+        logger.info(f"  4a. Hindi listener joined")
+
+        # Drain any pending messages from listener
+        await drain_messages(ws_listener, duration=1.0)
+
+        await ws_speaker.send(json.dumps({"type": "text_message", "text": "What is the sun? 1 sentence."}))
+
+        # Collect listener bot_text chunks
+        listener_texts = []
+        got_listener_complete = False
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            msg = await recv_json_nonbinary(ws_listener, timeout=15)
+            if not msg:
+                break
+            if msg.get("type") == "bot_text":
+                listener_texts.append(msg.get("text", ""))
+            elif msg.get("type") == "bot_text_complete":
+                got_listener_complete = True
+                break
+
+        listener_full = "".join(listener_texts)
+        logger.info(
+            f"  4b. Listener received (Hindi): '{listener_full[:60]}' "
+            f"({len(listener_texts)} chunks, complete={got_listener_complete})"
+        )
+
+        # Wait for speaker's complete too
+        speaker_complete2 = await wait_for_message_type(ws_speaker, "bot_text_complete", timeout=10)
+
+        await ws_speaker.close()
+        await ws_listener.close()
+        await asyncio.sleep(1)
+
+        # ── Step 5: Fetch and validate /metrics ──
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{HTTP_URL}/metrics") as resp:
+                assert resp.status == 200
+                metrics = await resp.json()
+
+        logger.info(f"  5. /metrics fetched — validating structure")
+
+        # Validate top-level keys
+        for key in ("uptime_seconds", "sessions", "tutor", "classroom", "errors", "recent_sessions"):
+            assert key in metrics, f"Missing top-level key: {key}"
+
+        # Validate sessions breakdown
+        sess = metrics["sessions"]
+        assert "tutor" in sess, "Missing sessions.tutor"
+        assert "classroom" in sess, "Missing sessions.classroom"
+        assert sess["tutor"]["total"] >= baseline["sessions"]["tutor"]["total"] + 1, \
+            f"Expected tutor session count to increase"
+        assert sess["classroom"]["total"] >= baseline["sessions"]["classroom"]["total"] + 2, \
+            f"Expected classroom session count to increase by ≥2"
+
+        # Validate tutor.text has data
+        tutor_text = metrics["tutor"]["text"]
+        assert tutor_text["query_count"] >= baseline["tutor"]["text"]["query_count"] + 2, \
+            f"Expected tutor.text.query_count to increase by ≥2, got {tutor_text['query_count']}"
+        assert "llm_total_ms" in tutor_text, "Missing tutor.text.llm_total_ms"
+        logger.info(
+            f"    tutor.text: queries={tutor_text['query_count']}, "
+            f"avg_llm={tutor_text.get('llm_total_ms', {}).get('avg', 0)}ms"
+        )
+
+        # Validate tutor.voice exists (may have turn_count=0 since we didn't speak)
+        tutor_voice = metrics["tutor"]["voice"]
+        logger.info(
+            f"    tutor.voice: turns={tutor_voice.get('turn_count', 0)}"
+        )
+
+        # Validate classroom.speaker has data
+        cls_speaker = metrics["classroom"]["speaker"]
+        assert cls_speaker["query_count"] >= baseline["classroom"]["speaker"]["query_count"] + 2, \
+            f"Expected classroom.speaker.query_count to increase by ≥2, got {cls_speaker['query_count']}"
+        assert "llm_ttft_ms" in cls_speaker, "Missing classroom.speaker.llm_ttft_ms"
+        assert "llm_total_ms" in cls_speaker, "Missing classroom.speaker.llm_total_ms"
+        logger.info(
+            f"    classroom.speaker: queries={cls_speaker['query_count']}, "
+            f"avg_ttft={cls_speaker.get('llm_ttft_ms', {}).get('avg', 0)}ms, "
+            f"avg_llm={cls_speaker.get('llm_total_ms', {}).get('avg', 0)}ms"
+        )
+
+        # Validate classroom.listener has translation + delivery data
+        cls_listener = metrics["classroom"]["listener"]
+        has_translation = "translation_ms" in cls_listener
+        has_delivery = "listener_delivery_ms" in cls_listener
+        logger.info(
+            f"    classroom.listener: translation={has_translation}, delivery={has_delivery}"
+        )
+        if has_translation:
+            logger.info(
+                f"      avg_translate={cls_listener['translation_ms'].get('avg', 0)}ms, "
+                f"avg_delivery={cls_listener.get('listener_delivery_ms', {}).get('avg', 0)}ms"
+            )
+
+        # Validate recent_sessions has entries
+        recent = metrics["recent_sessions"]
+        assert len(recent) >= 2, f"Expected ≥2 recent sessions, got {len(recent)}"
+
+        # Check that sessions have the right types
+        session_types = [s.get("type", s.get("mode", "unknown")) for s in recent[-4:]]
+        logger.info(f"    recent session types: {session_types}")
+
+        details = {
+            "tutor_text_queries": tutor_text["query_count"],
+            "tutor_voice_turns": tutor_voice.get("turn_count", 0),
+            "classroom_speaker_queries": cls_speaker["query_count"],
+            "classroom_listener_has_translation": has_translation,
+            "classroom_listener_has_delivery": has_delivery,
+            "sessions_total": sess["total"],
+            "sessions_tutor": sess["tutor"]["total"],
+            "sessions_classroom": sess["classroom"]["total"],
+            "recent_sessions_count": len(recent),
+            "speaker_answer": speaker_answer[:60],
+            "listener_answer_hindi": listener_full[:60],
+        }
+        logger.info(f"  ✅ Metrics endpoint test complete")
+        return TestResult(name="metrics_endpoint", passed=True, duration_sec=time.time() - t0, details=details)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return TestResult(name="metrics_endpoint", passed=False, error=str(e), duration_sec=time.time() - t0)
+
+
+# ═════════════════════════════════════════════════
 # Main
 # ═════════════════════════════════════════════════
 ALL_TESTS = {
@@ -1863,6 +2065,7 @@ ALL_TESTS = {
     "action_tag_filter_teacher_action": test_action_tag_filter_teacher_action,
     "three_clients_e2e": test_three_clients_e2e,
     "speaker_pipeline": test_speaker_pipeline,
+    "metrics_endpoint": test_metrics_endpoint,
 }
 
 

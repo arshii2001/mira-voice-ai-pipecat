@@ -141,10 +141,13 @@ class PipelineInstrumentor(FrameProcessor):
     Logs are prefixed with [METRICS] for easy grep/filtering.
     """
 
-    def __init__(self, name: str = "PipelineInstrumentor", **kwargs):
+    def __init__(self, name: str = "PipelineInstrumentor",
+                 metrics_collector=None, is_classroom: bool = False, **kwargs):
         super().__init__(name=name, **kwargs)
         self._turn_count = 0
         self._llm_buffer = ""
+        self._metrics_collector = metrics_collector  # Optional MetricsCollector
+        self._is_classroom = is_classroom  # Whether this is a classroom voice session
 
         # Per-turn timing anchors
         self._user_started_speaking_at: float = 0.0
@@ -200,6 +203,7 @@ class PipelineInstrumentor(FrameProcessor):
         user_speech_ms = self._ms(self._user_started_speaking_at, self._user_stopped_speaking_at)
         vad_to_stt_ms = self._ms(self._user_stopped_speaking_at, self._stt_final_at)
         stt_to_llm_ms = self._ms(self._stt_final_at, self._llm_first_token_at)
+        llm_ttft_ms = self._ms(self._user_stopped_speaking_at, self._llm_first_token_at)
         llm_generation_ms = self._ms(self._llm_response_start_at, self._llm_response_end_at)
         llm_to_tts_ms = self._ms(self._llm_first_token_at, self._tts_started_at)
         tts_duration_ms = self._ms(self._tts_started_at, self._tts_stopped_at)
@@ -213,9 +217,10 @@ class PipelineInstrumentor(FrameProcessor):
         if self._turn_latencies:
             avg_turn_latency = round(sum(self._turn_latencies) / len(self._turn_latencies), 1)
 
+        mode_label = "CLASSROOM" if self._is_classroom else "TUTOR"
         logger.info(f"")
         logger.info(f"{'─' * 70}")
-        logger.info(f"[METRICS] TURN {self._turn_count} SUMMARY")
+        logger.info(f"[METRICS][{mode_label}] TURN {self._turn_count} SUMMARY")
         logger.info(f"{'─' * 70}")
         logger.info(f"[METRICS]   User speech duration:    {user_speech_ms:>8.1f} ms")
         logger.info(f"[METRICS]   VAD→STT (transcribe):    {vad_to_stt_ms:>8.1f} ms")
@@ -230,6 +235,39 @@ class PipelineInstrumentor(FrameProcessor):
         logger.info(f"[METRICS]   Bot response: '{self._llm_buffer[:120]}{'...' if len(self._llm_buffer) > 120 else ''}'")
         logger.info(f"{'─' * 70}")
         logger.info(f"")
+
+        # ── Feed into MetricsCollector for /metrics endpoint ──
+        if self._metrics_collector:
+            self._metrics_collector.record_voice_turn(
+                turn_latency_ms=full_turn_latency_ms,
+                stt_ms=vad_to_stt_ms,
+                llm_ttft_ms=llm_ttft_ms,
+                llm_total_ms=llm_generation_ms,
+                llm_to_tts_ms=llm_to_tts_ms,
+                tts_ms=tts_duration_ms,
+                tokens=self._llm_token_count,
+                tts_bytes=self._tts_audio_bytes,
+                is_classroom=self._is_classroom,
+            )
+            # Per-call trace for voice pipeline
+            self._metrics_collector.record_trace({
+                "mode": "classroom_voice" if self._is_classroom else "tutor_voice",
+                "query": self._llm_buffer[:80],
+                "ts": self._user_stopped_speaking_at or time.time(),
+                "total_ms": full_turn_latency_ms,
+                "stages": [
+                    {"name": "user_speech", "ms": user_speech_ms},
+                    {"name": "vad_to_stt", "ms": vad_to_stt_ms},
+                    {"name": "stt_to_llm_ttft", "ms": stt_to_llm_ms},
+                    {"name": "llm_generation", "ms": llm_generation_ms,
+                     "tokens": self._llm_token_count},
+                    {"name": "llm_to_tts", "ms": llm_to_tts_ms},
+                    {"name": "tts", "ms": tts_duration_ms,
+                     "chunks": self._tts_audio_chunks,
+                     "audio_bytes": self._tts_audio_bytes},
+                    {"name": "bot_speaking", "ms": bot_speaking_ms},
+                ],
+            })
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -842,6 +880,8 @@ async def create_bot_pipeline(
     extra_processors: list = None,
     session_id: str = None,
     skip_greeting: bool = False,
+    metrics_collector=None,
+    is_classroom: bool = False,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
@@ -855,6 +895,8 @@ async def create_bot_pipeline(
         extra_processors: Optional list of FrameProcessors to insert into the pipeline
               after instrumentation (e.g., classroom broadcaster taps).
         skip_greeting: If True, skip the greeting message (for reconnects with history).
+        metrics_collector: Optional MetricsCollector for aggregated /metrics endpoint.
+        is_classroom: Whether this is a classroom voice session (affects metric categorization).
 
     Returns:
         Tuple of (PipelineTask, PipelineRunner, Transport)
@@ -944,7 +986,11 @@ async def create_bot_pipeline(
     assistant_aggregator = aggregator_pair.assistant()
 
     # Create pipeline instrumentor for comprehensive timing diagnostics
-    transcript_logger = PipelineInstrumentor(name="PipelineInstrumentor")
+    transcript_logger = PipelineInstrumentor(
+        name="PipelineInstrumentor",
+        metrics_collector=metrics_collector,
+        is_classroom=is_classroom,
+    )
 
     # Filter out any [TEACHER_ACTION: ...] / [TUTOR_ACTION: ...] tags the LLM might generate
     action_tag_filter = ActionTagFilter(name="ActionTagFilter")
@@ -1045,6 +1091,8 @@ async def run_bot(
     extra_processors: list = None,
     session_id: str = None,
     skip_greeting: bool = False,
+    metrics_collector=None,
+    is_classroom: bool = False,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -1056,6 +1104,8 @@ async def run_bot(
         mode: "text_and_audio" (default) or "text_only"
         session_id: Unique session ID for text injection support
         skip_greeting: If True, skip the greeting message (for reconnects)
+        metrics_collector: Optional MetricsCollector for aggregated /metrics endpoint.
+        is_classroom: Whether this is a classroom voice session.
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
@@ -1065,6 +1115,8 @@ async def run_bot(
         extra_processors=extra_processors,
         session_id=session_id,
         skip_greeting=skip_greeting,
+        metrics_collector=metrics_collector,
+        is_classroom=is_classroom,
     )
 
     # Add transport event handlers for proper RTVI protocol support

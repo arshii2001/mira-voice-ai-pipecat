@@ -64,6 +64,252 @@ logger = logging.getLogger(__name__)
 # Regex to strip [TEACHER_ACTION: ...] / [TUTOR_ACTION: ...] tags from LLM output
 _ACTION_TAG_RE = re.compile(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*', re.IGNORECASE)
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Metrics Collector (singleton, thread-safe via asyncio single-thread model)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _ComponentBucket:
+    """Rolling stats buffer for a single component dimension."""
+
+    def __init__(self, max_samples: int = 500):
+        self._max = max_samples
+        self.llm_ttft_ms: list[float] = []
+        self.llm_total_ms: list[float] = []
+        self.llm_tokens: list[int] = []
+        self.translation_ms: list[float] = []
+        self.tts_ms: list[float] = []
+        self.tts_bytes: list[int] = []
+        self.listener_delivery_ms: list[float] = []  # end-to-end per-listener sentence delivery
+        self.turn_latency_ms: list[float] = []  # voice pipeline: user-stop → first-audio
+        self.stt_latency_ms: list[float] = []   # voice pipeline: VAD→STT
+        self.llm_to_tts_ms: list[float] = []    # voice pipeline: LLM first token → TTS start
+        self.errors: Dict[str, int] = {}
+        self.query_count: int = 0
+        self.turn_count: int = 0
+
+    def _append(self, buf: list, value):
+        buf.append(value)
+        if len(buf) > self._max:
+            buf[:] = buf[-self._max:]
+
+    @staticmethod
+    def _stats(samples: list) -> dict:
+        if not samples:
+            return {"count": 0, "min": 0, "avg": 0, "p95": 0, "max": 0}
+        s = sorted(samples)
+        n = len(s)
+        return {
+            "count": n,
+            "min": round(s[0], 1),
+            "avg": round(sum(s) / n, 1),
+            "p95": round(s[int(n * 0.95)], 1) if n > 1 else round(s[0], 1),
+            "max": round(s[-1], 1),
+        }
+
+    def to_dict(self) -> dict:
+        d: dict = {}
+        if self.llm_ttft_ms:
+            d["llm_ttft_ms"] = self._stats(self.llm_ttft_ms)
+        if self.llm_total_ms:
+            d["llm_total_ms"] = self._stats(self.llm_total_ms)
+        if self.llm_tokens:
+            d["llm_tokens"] = self._stats(self.llm_tokens)
+        if self.translation_ms:
+            d["translation_ms"] = self._stats(self.translation_ms)
+        if self.tts_ms:
+            d["tts_ms"] = self._stats(self.tts_ms)
+        if self.tts_bytes:
+            d["tts_audio_bytes"] = self._stats(self.tts_bytes)
+        if self.listener_delivery_ms:
+            d["listener_delivery_ms"] = self._stats(self.listener_delivery_ms)
+        if self.turn_latency_ms:
+            d["turn_latency_ms"] = self._stats(self.turn_latency_ms)
+        if self.stt_latency_ms:
+            d["stt_latency_ms"] = self._stats(self.stt_latency_ms)
+        if self.llm_to_tts_ms:
+            d["llm_to_tts_ms"] = self._stats(self.llm_to_tts_ms)
+        d["query_count"] = self.query_count
+        d["turn_count"] = self.turn_count
+        if self.errors:
+            d["errors"] = dict(self.errors)
+        return d
+
+
+class MetricsCollector:
+    """Server-side performance metrics, separated by mode and role.
+
+    Structure:
+        tutor/          – voice pipeline (Pipecat) metrics for 1:1 tutor mode
+          voice/        – full voice turns (VAD→STT→LLM→TTS→audio)
+          text/         – typed text queries via /chat or /inject_text
+        classroom/
+          speaker/      – speaker's LLM queries (text or voice)
+          listener/     – per-listener delivery: translation + TTS
+        sessions/       – active/total counts, recent summaries
+        errors/         – global error counts
+    """
+
+    def __init__(self, max_samples: int = 500, max_traces: int = 50):
+        self._max = max_samples
+        self._max_traces = max_traces
+        self._start_time = time.time()
+
+        # ── Tutor mode ──
+        self.tutor_voice = _ComponentBucket(max_samples)
+        self.tutor_text = _ComponentBucket(max_samples)
+
+        # ── Classroom mode ──
+        self.classroom_speaker = _ComponentBucket(max_samples)
+        self.classroom_listener = _ComponentBucket(max_samples)
+
+        # ── Sessions ──
+        self.active_sessions: int = 0
+        self.total_sessions: int = 0
+        self.active_tutor_sessions: int = 0
+        self.active_classroom_sessions: int = 0
+        self.total_tutor_sessions: int = 0
+        self.total_classroom_sessions: int = 0
+        self.session_summaries: list[dict] = []
+
+        # ── Per-call trace log (rolling buffer of last N calls) ──
+        self.traces: list[dict] = []
+
+        # ── Global errors ──
+        self.errors: Dict[str, int] = {}
+
+    def _append(self, buf: list, value):
+        buf.append(value)
+        if len(buf) > self._max:
+            buf[:] = buf[-self._max:]
+
+    # ── Recording helpers ──
+
+    def record_llm_ttft(self, ttft_ms: float, mode: str = "classroom"):
+        """mode: 'classroom' or 'tutor'"""
+        bucket = self.classroom_speaker if mode == "classroom" else self.tutor_voice
+        bucket._append(bucket.llm_ttft_ms, ttft_ms)
+
+    def record_llm_query(self, total_ms: float, tokens: int, mode: str = "classroom"):
+        bucket = self.classroom_speaker if mode == "classroom" else self.tutor_voice
+        bucket._append(bucket.llm_total_ms, total_ms)
+        bucket._append(bucket.llm_tokens, tokens)
+        bucket.query_count += 1
+
+    def record_translation(self, ms: float):
+        self.classroom_listener._append(self.classroom_listener.translation_ms, ms)
+
+    def record_tts(self, ms: float, audio_bytes: int, mode: str = "classroom"):
+        bucket = self.classroom_listener if mode == "classroom" else self.tutor_voice
+        bucket._append(bucket.tts_ms, ms)
+        bucket._append(bucket.tts_bytes, audio_bytes)
+
+    def record_listener_delivery(self, total_ms: float):
+        self.classroom_listener._append(self.classroom_listener.listener_delivery_ms, total_ms)
+
+    def record_voice_turn(self, turn_latency_ms: float, stt_ms: float,
+                          llm_ttft_ms: float, llm_total_ms: float,
+                          llm_to_tts_ms: float, tts_ms: float,
+                          tokens: int, tts_bytes: int,
+                          is_classroom: bool = False):
+        """Record a full voice pipeline turn from PipelineInstrumentor."""
+        bucket = self.classroom_speaker if is_classroom else self.tutor_voice
+        if turn_latency_ms > 0:
+            bucket._append(bucket.turn_latency_ms, turn_latency_ms)
+        if stt_ms > 0:
+            bucket._append(bucket.stt_latency_ms, stt_ms)
+        if llm_ttft_ms > 0:
+            bucket._append(bucket.llm_ttft_ms, llm_ttft_ms)
+        if llm_total_ms > 0:
+            bucket._append(bucket.llm_total_ms, llm_total_ms)
+            bucket._append(bucket.llm_tokens, tokens)
+        if llm_to_tts_ms > 0:
+            bucket._append(bucket.llm_to_tts_ms, llm_to_tts_ms)
+        if tts_ms > 0:
+            bucket._append(bucket.tts_ms, tts_ms)
+            bucket._append(bucket.tts_bytes, tts_bytes)
+        bucket.turn_count += 1
+
+    def record_tutor_text_query(self, total_ms: float, tokens: int, ttft_ms: float):
+        """Record a tutor text-mode query (via /chat endpoint)."""
+        self.tutor_text._append(self.tutor_text.llm_total_ms, total_ms)
+        self.tutor_text._append(self.tutor_text.llm_tokens, tokens)
+        if ttft_ms > 0:
+            self.tutor_text._append(self.tutor_text.llm_ttft_ms, ttft_ms)
+        self.tutor_text.query_count += 1
+
+    def record_trace(self, trace: dict):
+        """Record a per-call trace with full pipeline breakdown.
+
+        trace should contain:
+            mode: "tutor_text" | "tutor_voice" | "classroom"
+            query: str (truncated)
+            ts: float (epoch)
+            stages: list of {name, ms, detail?}
+            total_ms: float
+            listeners?: list of {user, language, stages: [{name, ms}], total_ms}
+        """
+        trace.setdefault("ts", time.time())
+        self.traces.append(trace)
+        if len(self.traces) > self._max_traces:
+            self.traces[:] = self.traces[-self._max_traces:]
+
+    def record_error(self, category: str):
+        self.errors[category] = self.errors.get(category, 0) + 1
+
+    def session_start(self, mode: str = "classroom"):
+        self.active_sessions += 1
+        self.total_sessions += 1
+        if mode == "classroom":
+            self.active_classroom_sessions += 1
+            self.total_classroom_sessions += 1
+        else:
+            self.active_tutor_sessions += 1
+            self.total_tutor_sessions += 1
+
+    def session_end(self, summary: dict):
+        self.active_sessions = max(0, self.active_sessions - 1)
+        mode = summary.get("type", summary.get("mode", "classroom"))
+        if mode in ("voice", "tutor"):
+            self.active_tutor_sessions = max(0, self.active_tutor_sessions - 1)
+        else:
+            self.active_classroom_sessions = max(0, self.active_classroom_sessions - 1)
+        self._append(self.session_summaries, summary)
+
+    def snapshot(self) -> dict:
+        """Return a JSON-serializable metrics snapshot."""
+        uptime = time.time() - self._start_time
+        return {
+            "uptime_seconds": round(uptime, 1),
+            "sessions": {
+                "active": self.active_sessions,
+                "total": self.total_sessions,
+                "tutor": {
+                    "active": self.active_tutor_sessions,
+                    "total": self.total_tutor_sessions,
+                },
+                "classroom": {
+                    "active": self.active_classroom_sessions,
+                    "total": self.total_classroom_sessions,
+                },
+            },
+            "tutor": {
+                "voice": self.tutor_voice.to_dict(),
+                "text": self.tutor_text.to_dict(),
+            },
+            "classroom": {
+                "speaker": self.classroom_speaker.to_dict(),
+                "listener": self.classroom_listener.to_dict(),
+            },
+            "errors": dict(self.errors),
+            "recent_sessions": self.session_summaries[-10:],
+            "traces": self.traces[-20:],  # Last 20 per-call traces
+        }
+
+
+_metrics_collector = MetricsCollector()
+
 # ─────────────────────────────────────────────────────────────────────
 # Data models
 # ─────────────────────────────────────────────────────────────────────
@@ -250,15 +496,13 @@ class RoomManager:
         sentence: str,
         source_lang: str,
         is_final: bool = False,
-    ):
+    ) -> list[dict]:
         """Translate + send a sentence chunk to all listeners in parallel.
 
-        Same-language text_only listeners get the raw text immediately.
-        Different-language listeners get translated text.
-        Audio listeners additionally get TTS for the chunk.
+        Returns a list of per-listener delivery timing dicts.
         """
         if not sentence.strip():
-            return
+            return []
 
         tasks = []
         # Snapshot users to avoid "dictionary changed size during iteration"
@@ -268,7 +512,9 @@ class RoomManager:
                 self._deliver_sentence_to_listener(user, sentence, source_lang, is_final)
             )
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return [r for r in results if isinstance(r, dict)]
+        return []
 
     async def _deliver_sentence_to_listener(
         self,
@@ -276,10 +522,15 @@ class RoomManager:
         sentence: str,
         source_lang: str,
         is_final: bool,
-    ):
-        """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode)."""
+    ) -> dict:
+        """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode).
+
+        Returns a timing dict: {user, language, mode, translate_ms, tts_ms, audio_bytes, total_ms}
+        """
+        t_start = time.time()
         try:
-            # Translate if different language
+            # ── Translation ──
+            t_translate_start = time.time()
             if user.language != source_lang and self._translator:
                 translated = await self._translator.translate(
                     text=sentence,
@@ -288,6 +539,16 @@ class RoomManager:
                 )
             else:
                 translated = sentence
+            t_translate_done = time.time()
+            translate_ms = round((t_translate_done - t_translate_start) * 1000, 1)
+
+            if user.language != source_lang:
+                logger.info(
+                    f"[METRICS][CLASSROOM] translate | user={user.name} "
+                    f"| {source_lang}→{user.language} | {translate_ms}ms | "
+                    f"in_len={len(sentence)} out_len={len(translated)}"
+                )
+                _metrics_collector.record_translation(translate_ms)
 
             # Send streamed text chunk
             await self._send_json(user.websocket, {
@@ -297,15 +558,13 @@ class RoomManager:
                 "translated": user.language != source_lang,
                 "target_language": user.language,
             })
-            logger.info(
-                f"[CLASSROOM] deliver_sentence | user={user.name}({user.language}) "
-                f"| mode={user.mode} | text_len={len(translated)} | final={is_final}"
-            )
 
             # TTS for audio-mode listeners
+            tts_ms = 0.0
+            audio_bytes = 0
             if self._tts and user.mode == "text_and_audio":
+                t_tts_start = time.time()
                 await self._send_json(user.websocket, {"type": "bot_audio_start"})
-                audio_bytes = 0
                 try:
                     async for frame in self._tts.run_tts(translated):
                         if hasattr(frame, "audio") and frame.audio:
@@ -313,16 +572,46 @@ class RoomManager:
                             audio_bytes += len(frame.audio)
                 except Exception as tts_err:
                     logger.warning(f"[CLASSROOM] Sentence TTS error for {user.name}: {tts_err}")
+                    _metrics_collector.record_error("listener_tts")
                 await self._send_json(user.websocket, {"type": "bot_audio_end"})
-                logger.info(
-                    f"[CLASSROOM] deliver_sentence_audio | user={user.name}({user.language}) "
-                    f"| audio={audio_bytes}B | text='{translated[:40]}'"
-                )
+                tts_ms = round((time.time() - t_tts_start) * 1000, 1)
+                _metrics_collector.record_tts(tts_ms, audio_bytes)
             elif not self._tts and user.mode == "text_and_audio":
                 logger.warning(f"[CLASSROOM] No TTS available for audio-mode listener {user.name}")
 
+            total_ms = round((time.time() - t_start) * 1000, 1)
+            logger.info(
+                f"[METRICS][CLASSROOM] deliver_sentence | user={user.name}({user.language}) "
+                f"| mode={user.mode} | total={total_ms}ms | translate={translate_ms}ms "
+                f"| tts={tts_ms}ms | audio={audio_bytes}B | final={is_final} "
+                f"| text='{translated[:40]}'"
+            )
+            _metrics_collector.record_listener_delivery(total_ms)
+
+            return {
+                "user": user.name,
+                "language": user.language,
+                "mode": user.mode,
+                "translate_ms": translate_ms,
+                "tts_ms": tts_ms,
+                "audio_bytes": audio_bytes,
+                "total_ms": total_ms,
+            }
+
         except Exception as e:
-            logger.warning(f"[CLASSROOM] Failed to deliver sentence to {user.name}: {e}")
+            total_ms = round((time.time() - t_start) * 1000, 1)
+            logger.warning(
+                f"[METRICS][CLASSROOM] deliver_sentence_error | user={user.name} "
+                f"| elapsed={total_ms}ms | error={e}"
+            )
+            _metrics_collector.record_error("deliver_sentence")
+            return {
+                "user": user.name,
+                "language": user.language,
+                "mode": user.mode,
+                "error": str(e),
+                "total_ms": total_ms,
+            }
 
     async def ask_llm(
         self,
@@ -358,6 +647,11 @@ class RoomManager:
         pending_listener_tasks: list[asyncio.Task] = []
         source_lang = "en"  # LLM responds in the language of the question; default en
 
+        # ── Timing anchors ──
+        t_first_token: float = 0.0      # Time-to-first-token
+        token_count: int = 0
+        sentence_count: int = 0
+
         # Build messages with conversation history for context
         messages = [{"role": "system", "content": system_prompt}]
         if room and room.conversation_history:
@@ -384,6 +678,18 @@ class RoomManager:
                     token = delta.content
                     full_response += token
                     sentence_buffer += token
+                    token_count += 1
+
+                    # Track TTFT (Time-to-First-Token)
+                    if token_count == 1:
+                        t_first_token = time.time()
+                        ttft_ms = round((t_first_token - t0) * 1000, 1)
+                        logger.info(
+                            f"[METRICS][CLASSROOM] ask_llm_ttft | "
+                            f"ttft={ttft_ms}ms | first_token='{token[:20]}'"
+                        )
+                        # Record for aggregation
+                        _metrics_collector.record_llm_ttft(ttft_ms)
 
                     # Stream each token to the speaker immediately
                     try:
@@ -404,6 +710,14 @@ class RoomManager:
                         sentence_buffer = parts[-1] if len(parts) > 1 else ""
 
                         if complete:
+                            sentence_count += 1
+                            t_sentence_dispatch = time.time()
+                            logger.info(
+                                f"[METRICS][CLASSROOM] sentence_dispatch | "
+                                f"sentence={sentence_count} | "
+                                f"elapsed={round((t_sentence_dispatch - t0) * 1000, 1)}ms | "
+                                f"len={len(complete)} | text='{complete[:50]}'"
+                            )
                             task = asyncio.create_task(
                                 self._stream_sentence_to_listeners(
                                     room, complete, source_lang, is_final=False,
@@ -411,8 +725,17 @@ class RoomManager:
                             )
                             pending_listener_tasks.append(task)
 
+            t_llm_done = time.time()
+
             # Flush remaining sentence buffer to listeners
             if stream_to_listeners and room and sentence_buffer.strip():
+                sentence_count += 1
+                logger.info(
+                    f"[METRICS][CLASSROOM] sentence_dispatch | "
+                    f"sentence={sentence_count} (final flush) | "
+                    f"elapsed={round((t_llm_done - t0) * 1000, 1)}ms | "
+                    f"len={len(sentence_buffer.strip())} | text='{sentence_buffer.strip()[:50]}'"
+                )
                 task = asyncio.create_task(
                     self._stream_sentence_to_listeners(
                         room, sentence_buffer.strip(), source_lang, is_final=True,
@@ -435,9 +758,18 @@ class RoomManager:
             except Exception:
                 pass
 
-            # Wait for all listener delivery tasks to finish
+            # Wait for all listener delivery tasks to finish and collect results
+            t_listener_wait_start = time.time()
+            listener_delivery_results: list[dict] = []
             if pending_listener_tasks:
-                await asyncio.gather(*pending_listener_tasks, return_exceptions=True)
+                raw_results = await asyncio.gather(*pending_listener_tasks, return_exceptions=True)
+                # Each task returns a list of per-listener dicts
+                for r in raw_results:
+                    if isinstance(r, list):
+                        listener_delivery_results.extend(r)
+                    elif isinstance(r, Exception):
+                        logger.warning(f"[CLASSROOM] Listener fanout error: {r}")
+            t_listener_done = time.time()
 
             # Signal listeners that streaming is done (lightweight, no re-translation)
             if stream_to_listeners and room:
@@ -462,16 +794,79 @@ class RoomManager:
                 if len(room.conversation_history) > 40:
                     room.conversation_history = room.conversation_history[-30:]
 
-            latency_ms = round((time.time() - t0) * 1000, 1)
+            # ── Comprehensive timing summary ──
+            total_ms = round((time.time() - t0) * 1000, 1)
+            llm_stream_ms = round((t_llm_done - t0) * 1000, 1)
+            ttft_ms = round((t_first_token - t0) * 1000, 1) if t_first_token else 0.0
+            listener_wait_ms = round((t_listener_done - t_listener_wait_start) * 1000, 1)
+            tokens_per_sec = round(token_count / ((t_llm_done - t0) or 1), 1)
+
             logger.info(
-                f"[CLASSROOM] LLM text query | latency={latency_ms}ms | "
-                f"listeners_streamed={len(pending_listener_tasks)} chunks | "
-                f"q='{question[:50]}' | a='{full_response[:50]}'"
+                f"[METRICS][CLASSROOM] ask_llm_complete | "
+                f"total={total_ms}ms | ttft={ttft_ms}ms | "
+                f"llm_stream={llm_stream_ms}ms | listener_fanout={listener_wait_ms}ms | "
+                f"tokens={token_count} ({tokens_per_sec} tok/s) | "
+                f"sentences={sentence_count} | response_len={len(full_response)} | "
+                f"q='{question[:40]}' | a='{full_response[:40]}'"
             )
+            # Record for aggregation
+            _metrics_collector.record_llm_query(total_ms, token_count)
+
+            # ── Record per-call trace ──
+            # Aggregate per-listener delivery by user (across sentences)
+            listener_summaries: Dict[str, dict] = {}
+            for ld in listener_delivery_results:
+                key = ld.get("user", "?")
+                if key not in listener_summaries:
+                    listener_summaries[key] = {
+                        "user": key,
+                        "language": ld.get("language", "?"),
+                        "mode": ld.get("mode", "?"),
+                        "sentences": 0,
+                        "translate_ms": 0.0,
+                        "tts_ms": 0.0,
+                        "audio_bytes": 0,
+                        "total_ms": 0.0,
+                    }
+                s = listener_summaries[key]
+                s["sentences"] += 1
+                s["translate_ms"] += ld.get("translate_ms", 0.0)
+                s["tts_ms"] += ld.get("tts_ms", 0.0)
+                s["audio_bytes"] += ld.get("audio_bytes", 0)
+                s["total_ms"] = max(s["total_ms"], ld.get("total_ms", 0.0))  # max across sentences
+
+            # Round the aggregated values
+            for s in listener_summaries.values():
+                s["translate_ms"] = round(s["translate_ms"], 1)
+                s["tts_ms"] = round(s["tts_ms"], 1)
+                s["total_ms"] = round(s["total_ms"], 1)
+
+            trace = {
+                "mode": "classroom",
+                "query": question[:80],
+                "answer": full_response[:80],
+                "ts": t0,
+                "total_ms": total_ms,
+                "stages": [
+                    {"name": "llm_ttft", "ms": ttft_ms},
+                    {"name": "llm_stream", "ms": llm_stream_ms, "tokens": token_count,
+                     "tok_per_sec": tokens_per_sec},
+                    {"name": "listener_fanout", "ms": listener_wait_ms,
+                     "sentences": sentence_count},
+                ],
+                "listeners": list(listener_summaries.values()),
+            }
+            _metrics_collector.record_trace(trace)
+
             return full_response
 
         except Exception as e:
-            logger.error(f"[CLASSROOM] LLM query failed: {e}")
+            total_ms = round((time.time() - t0) * 1000, 1)
+            logger.error(
+                f"[METRICS][CLASSROOM] ask_llm_error | "
+                f"elapsed={total_ms}ms | tokens={token_count} | error={e}"
+            )
+            _metrics_collector.record_error("ask_llm")
             try:
                 await speaker_ws.send_json({"type": "error", "message": f"LLM error: {e}"})
             except Exception:
@@ -1515,11 +1910,14 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
     """
     await websocket.accept()
     logger.info(f"[CLASSROOM] WebSocket connected for room {room_id}")
+    _metrics_collector.session_start()
+    session_start_time = time.time()
 
     room = room_manager.get_room(room_id)
     if not room:
         await websocket.send_json({"type": "error", "message": "Room not found"})
         await websocket.close()
+        _metrics_collector.session_end({"room_id": room_id, "error": "room_not_found", "duration_s": 0})
         return
 
     # Wait for join message
@@ -1778,6 +2176,23 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
     except Exception as e:
         logger.error(f"[CLASSROOM] WebSocket error for {user.user_id}: {e}")
     finally:
+        session_duration = round(time.time() - session_start_time, 1)
+        session_summary = {
+            "room_id": room_id,
+            "user_id": user.user_id if user else "unknown",
+            "user_name": user.name if user else "unknown",
+            "language": user.language if user else "unknown",
+            "mode": user.mode if user else "unknown",
+            "was_speaker": user.is_speaker if user else False,
+            "duration_s": session_duration,
+            "disconnected_at": time.time(),
+        }
+        _metrics_collector.session_end(session_summary)
+        logger.info(
+            f"[METRICS][CLASSROOM] session_end | user={session_summary['user_name']} "
+            f"| room={room_id} | duration={session_duration}s | "
+            f"speaker={session_summary['was_speaker']} | mode={session_summary['mode']}"
+        )
         if user:
             await room_manager.remove_user(room_id, user.user_id)
 

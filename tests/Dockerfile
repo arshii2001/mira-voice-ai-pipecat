@@ -18,6 +18,7 @@ COPY tests/test_audio/ /app/tests/test_audio/
 COPY tests/test_rtvi.py /app/tests/
 COPY tests/test_text_mode.py /app/tests/
 COPY tests/test_classroom_mode.py /app/tests/
+COPY tests/test_performance.py /app/tests/
 
 # Copy server code (needed for unit tests that import classroom/database/translator modules)
 COPY classroom.py /app/

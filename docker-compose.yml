@@ -107,6 +107,28 @@ services:
     profiles:
       - test  # Only runs when explicitly requested
 
+  # ============================================
+  # Cypress E2E UI Tests
+  # Run with: docker compose run --rm test-ui
+  # Or:       docker compose run --rm test-ui --spec "cypress/e2e/classroom_teacher.cy.ts"
+  # ============================================
+  test-ui:
+    build:
+      context: ../mira_openwebui
+      dockerfile: cypress/Dockerfile
+    container_name: mira-test-ui
+    environment:
+      - CYPRESS_baseUrl=http://open-webui:8080
+    networks:
+      - mira-network
+    depends_on:
+      mira-voice:
+        condition: service_healthy
+      open-webui:
+        condition: service_started
+    profiles:
+      - test  # Only runs when explicitly requested
+
 networks:
   mira-network:
     driver: bridge

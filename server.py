@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import signal
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -45,7 +46,7 @@ from bot import (
     TTS_VOICE_GENDER,
 )
 from services.elevenlabs_tts import VOICE_PRESETS
-from classroom import router as classroom_router, room_manager, ClassroomBroadcaster
+from classroom import router as classroom_router, room_manager, ClassroomBroadcaster, _metrics_collector
 
 # Configure logging
 logging.basicConfig(
@@ -97,6 +98,17 @@ app.include_router(classroom_router)
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "mira-voice-ai-pipecat"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Server-side performance metrics.
+
+    Returns aggregated stats for LLM (TTFT, total latency, token counts),
+    translation, TTS, error counts, active/total sessions, and recent
+    session summaries.
+    """
+    return _metrics_collector.snapshot()
 
 
 @app.post("/connect")
@@ -160,6 +172,9 @@ async def chat_completion(req: ChatRequest):
 
     if req.stream:
         async def generate():
+            t0 = time.time()
+            t_first_token = 0.0
+            token_count = 0
             async with httpx.AsyncClient(timeout=60.0) as client:
                 async with client.stream(
                     "POST",
@@ -169,18 +184,54 @@ async def chat_completion(req: ChatRequest):
                 ) as resp:
                     async for line in resp.aiter_lines():
                         if line.startswith("data: "):
+                            token_count += 1
+                            if token_count == 1:
+                                t_first_token = time.time()
                             yield line + "\n\n"
                         elif line == "":
                             continue
+            # Record tutor text metrics
+            total_ms = round((time.time() - t0) * 1000, 1)
+            ttft_ms = round((t_first_token - t0) * 1000, 1) if t_first_token else 0.0
+            tokens_per_sec = round(token_count / ((time.time() - t0) or 1), 1)
+            _metrics_collector.record_tutor_text_query(total_ms, token_count, ttft_ms)
+            _metrics_collector.record_trace({
+                "mode": "tutor_text",
+                "query": messages[-1]["content"][:80] if messages else "",
+                "ts": t0,
+                "total_ms": total_ms,
+                "stages": [
+                    {"name": "llm_ttft", "ms": ttft_ms},
+                    {"name": "llm_stream", "ms": total_ms, "tokens": token_count,
+                     "tok_per_sec": tokens_per_sec},
+                ],
+            })
+            logger.info(
+                f"[METRICS][TUTOR] chat_stream | total={total_ms}ms | "
+                f"ttft={ttft_ms}ms | tokens={token_count}"
+            )
 
         return StreamingResponse(generate(), media_type="text/event-stream")
     else:
+        t0 = time.time()
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 json={"model": model, "messages": messages, "stream": False},
                 headers={"Authorization": f"Bearer {api_key}"},
             )
+            total_ms = round((time.time() - t0) * 1000, 1)
+            _metrics_collector.record_tutor_text_query(total_ms, 0, 0.0)
+            _metrics_collector.record_trace({
+                "mode": "tutor_text",
+                "query": messages[-1]["content"][:80] if messages else "",
+                "ts": t0,
+                "total_ms": total_ms,
+                "stages": [
+                    {"name": "llm_sync", "ms": total_ms},
+                ],
+            })
+            logger.info(f"[METRICS][TUTOR] chat_sync | total={total_ms}ms")
             return resp.json()
 
 
@@ -331,17 +382,62 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
         }
 
 
+def make_websocket_binary_safe(websocket: WebSocket) -> WebSocket:
+    """
+    Monkey-patch a FastAPI WebSocket so that receive_bytes() silently skips
+    any text-only messages instead of crashing with KeyError('bytes').
+
+    Pipecat's FastAPIWebsocketInputTransport uses iter_bytes() → receive_bytes()
+    which internally calls self.receive() and then accesses message["bytes"].
+    If a text message arrives (e.g. a late config JSON), the missing "bytes" key
+    causes a KeyError that kills the transport.
+
+    This patch overrides receive_bytes() to loop until a binary frame arrives,
+    silently discarding any interleaved text frames.
+    """
+    _original_receive = websocket.receive
+
+    async def _binary_safe_receive_bytes() -> bytes:
+        while True:
+            message = await _original_receive()
+            msg_type = message.get("type", "")
+
+            # Disconnect → raise so iter_bytes() terminates cleanly
+            if msg_type == "websocket.disconnect":
+                from starlette.websockets import WebSocketDisconnect
+                raise WebSocketDisconnect(
+                    code=message.get("code", 1000),
+                    reason=message.get("reason"),
+                )
+
+            # Binary frame — return it
+            if "bytes" in message and message["bytes"] is not None:
+                return message["bytes"]
+
+            # Text-only frame — log and skip
+            text = message.get("text", "")
+            logger.info(
+                f"[BinarySafeWS] Skipping text message ({len(text)} chars): "
+                f"{text[:120]}..."
+            )
+
+    websocket.receive_bytes = _binary_safe_receive_bytes  # type: ignore[assignment]
+    return websocket
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for voice interaction."""
     await websocket.accept()
     logger.info("WebSocket connection accepted")
+    voice_session_start = time.time()
+    ws_session_mode = "tutor"  # Will be updated to "classroom" if room_id is present
 
     # Generate a unique session ID for text injection support
     session_id = str(uuid.uuid4())
 
-    # Wait for optional config message
-    config = await receive_client_config(websocket, timeout=1.0)
+    # Wait for optional config message (5s timeout for high-latency connections like Tailscale Ingress)
+    config = await receive_client_config(websocket, timeout=5.0)
 
     # Send session_id to the client so it can use /inject_text
     try:
@@ -350,9 +446,14 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.warning(f"Failed to send session_id: {e}")
 
+    # Patch the WebSocket so Pipecat's binary transport ignores any stray text messages
+    make_websocket_binary_safe(websocket)
+
     try:
         room_id = config.get("room_id")
         speaker_id = config.get("speaker_id")
+        ws_session_mode = "classroom" if room_id else "tutor"
+        _metrics_collector.session_start(mode=ws_session_mode)
 
         extra_processors = None
         classroom_system_prompt = config.get("system_prompt")
@@ -395,11 +496,29 @@ async def websocket_endpoint(websocket: WebSocket):
             extra_processors=extra_processors,
             session_id=session_id,
             skip_greeting=skip_greeting,
+            metrics_collector=_metrics_collector,
+            is_classroom=bool(room_id),
         )
     except WebSocketDisconnect:
         logger.info("Client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+    finally:
+        duration = round(time.time() - voice_session_start, 1)
+        room_id = config.get("room_id") if config else None
+        _metrics_collector.session_end({
+            "type": ws_session_mode,
+            "subtype": "voice",
+            "session_id": session_id,
+            "room_id": room_id,
+            "duration_s": duration,
+            "disconnected_at": time.time(),
+        })
+        logger.info(
+            f"[METRICS] voice_session_end | mode={ws_session_mode} "
+            f"| session={session_id[:8]}... "
+            f"| room={room_id or 'tutor'} | duration={duration}s"
+        )
 
 
 class InjectTextRequest(BaseModel):
