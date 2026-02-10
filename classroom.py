@@ -58,6 +58,7 @@ from starlette.websockets import WebSocketState
 
 from translator import Translator, LANG_NAMES
 from database import db as classroom_db
+from bot import load_system_prompt, PROMPT_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -442,50 +443,25 @@ class RoomManager:
             logger.warning("No LLM API key — classroom text mode disabled")
 
     def _get_co_teaching_prompt(self, room: Optional["Room"] = None) -> str:
-        """Return the co-teaching system prompt for AI-assisted teaching mode."""
-        topic_line = ""
-        if room and room.current_lesson_topic:
-            topic_line = f"\nCurrent lesson topic: {room.current_lesson_topic}\n"
+        """Return the co-teaching system prompt for AI-assisted teaching mode.
 
-        return (
-            "You are Mira, an AI co-teacher in a live classroom. "
-            "A human teacher is guiding the lesson. Students are listening.\n\n"
-            "## YOUR ROLE\n"
-            "- You are the teacher's teaching assistant. Support them.\n"
-            "- Give structured explanations — not just answers. Use step-by-step breakdowns.\n"
-            "- Use analogies and real-world examples to make concepts stick.\n"
-            "- When explaining, break complex topics into digestible steps.\n"
-            "- Occasionally check understanding: 'Does that make sense?' or "
-            "'Let me check — can someone tell me...'\n"
-            "- Maintain full lesson context — remember what was covered.\n\n"
-            f"{topic_line}"
-            "## TEACHER COMMANDS (these are INPUT you may receive — respond to them)\n"
-            "The teacher may send you special commands in square brackets. "
-            "When you see these commands, respond with the requested content directly. "
-            "**NEVER output or echo these command tags yourself.** "
-            "They are INPUT from the teacher's toolbar buttons, not something you should generate.\n\n"
-            "- [TEACHER_ACTION: SET_TOPIC <topic>] — Introduce this topic with a structured overview. "
-            "Give a clear 3-4 sentence introduction, mention what students will learn.\n"
-            "- [TEACHER_ACTION: QUIZ] — Generate exactly 3 quick-check questions about what was just discussed. "
-            "Format: number each question, give 4 options (A-D), mark the correct answer.\n"
-            "- [TEACHER_ACTION: SUMMARIZE] — Produce a checkpoint summary of the lesson so far. "
-            "List the key points covered, what students should remember.\n"
-            "- [TEACHER_ACTION: SIMPLIFY] — Re-explain the last point more simply. "
-            "Use a different analogy, simpler words, or a concrete example.\n"
-            "- [TEACHER_ACTION: NEXT] — Move to the next logical subtopic. "
-            "Bridge from what was just covered to the next concept naturally.\n\n"
-            "## CRITICAL RESPONSE RULES\n"
-            "- **NEVER generate [TEACHER_ACTION: ...] tags in your output.** Those are input commands, not output format.\n"
-            "- When the teacher asks a normal question (not a command), answer it naturally and directly.\n"
-            "- Do NOT greet or introduce yourself — just respond to what's asked.\n"
-            "- Keep responses concise but educational (aim for 2-5 sentences normally, "
-            "longer for topic introductions and quizzes).\n"
-            "- Use simple language suitable for students.\n"
-            "- When a student asks a question, guide them to understanding rather than "
-            "just giving the answer.\n"
-            "- Match the language of the question — if asked in Hindi, respond in Hindi; "
-            "if asked in English, respond in English.\n"
-        )
+        Composes base + classroom prompt from versioned files.
+        Appends dynamic student context (topic, speaker name).
+        """
+        prompt = load_system_prompt(version=PROMPT_VERSION, mode="classroom")
+
+        # Build dynamic context block
+        context_lines = []
+        if room and room.current_lesson_topic:
+            context_lines.append(f"Topic: {room.current_lesson_topic}")
+        if room and room.speaker_id and room.speaker_id in room.users:
+            speaker = room.users[room.speaker_id]
+            context_lines.append(f"Current speaker: {speaker.name}")
+
+        if context_lines:
+            prompt += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
+
+        return prompt
 
     # Sentence boundary pattern for chunked streaming to listeners
     _SENTENCE_RE = re.compile(r'(?<=[.!?।\n])\s+')
@@ -1729,12 +1705,20 @@ class ClassroomBroadcaster(FrameProcessor):
                 f"lang={self._last_user_lang} | text='{frame.text[:50]}'"
             )
 
+            # Prepend speaker name so the LLM knows who asked
+            speaker_name = None
+            if self._room.speaker_id and self._room.speaker_id in self._room.users:
+                speaker_name = self._room.users[self._room.speaker_id].name
+            if speaker_name:
+                frame.text = f"[{speaker_name} asks] {frame.text}"
+                logger.info(f"[CLASSROOM] Attributed transcription to {speaker_name}")
+
             # Broadcast in background so we don't slow down the pipeline
             asyncio.create_task(
                 self._room_mgr.broadcast_transcription(
                     room=self._room,
                     speaker_id=self._room.speaker_id or "",
-                    text=frame.text,
+                    text=self._last_user_text,  # Original text without prefix for listeners
                     language=self._last_user_lang,
                 )
             )

@@ -717,23 +717,51 @@ VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.6"))
 
 # Prompt configuration
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
-PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v3")
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v4")
 
 
-def load_system_prompt(version: str = PROMPT_VERSION) -> str:
-    """Load system prompt from prompts directory."""
-    prompt_path = os.path.join(PROMPT_DIR, f"{version}.md")
+def _load_prompt_file(filename: str) -> str:
+    """Load a single prompt file from the prompts directory."""
+    prompt_path = os.path.join(PROMPT_DIR, filename)
     try:
         with open(prompt_path, "r", encoding="utf-8") as f:
             return f.read().strip()
     except FileNotFoundError:
-        logger.warning(f"Prompt file not found: {prompt_path}, using default")
-        return "You are a helpful voice assistant. Keep responses concise."
+        logger.warning(f"Prompt file not found: {prompt_path}")
+        return ""
+
+
+def load_system_prompt(version: str = PROMPT_VERSION, mode: str = "voice") -> str:
+    """Load system prompt from prompts directory.
+
+    For v4+, composes base + mode-specific prompt.
+    For older versions (v1-v3), loads the single file as before.
+
+    Args:
+        version: Prompt version (e.g. "v3", "v4").
+        mode: One of "voice", "classroom", "text". Only used for v4+.
+    """
+    if version.startswith("v4"):
+        base = _load_prompt_file(f"{version}-base.md")
+        mode_prompt = _load_prompt_file(f"{version}-{mode}.md")
+        if base and mode_prompt:
+            return base + "\n\n" + mode_prompt
+        elif base:
+            return base
+        elif mode_prompt:
+            return mode_prompt
+        else:
+            logger.warning(f"No v4 prompt files found for {version}/{mode}, using fallback")
+            return "You are a helpful voice assistant. Keep responses concise."
+    else:
+        # Legacy single-file prompts (v1, v2, v3)
+        content = _load_prompt_file(f"{version}.md")
+        return content or "You are a helpful voice assistant. Keep responses concise."
 
 
 def get_default_system_prompt() -> str:
-    """Get default system prompt (uses PROMPT_VERSION env var, defaults to v3)."""
-    return load_system_prompt(version=PROMPT_VERSION)
+    """Get default system prompt for voice tutor mode."""
+    return load_system_prompt(version=PROMPT_VERSION, mode="voice")
 
 
 # Greeting text spoken when connection is established
@@ -967,6 +995,7 @@ async def create_bot_pipeline(
     # Build initial messages with system prompt and optional user-provided context
     effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
     messages = [{"role": "system", "content": effective_prompt}]
+    logger.info(f"[PIPELINE] System prompt: {len(effective_prompt)} chars (version={PROMPT_VERSION})")
     # Pre-seed the greeting as an assistant message so the LLM knows it was spoken,
     # even if the greeting audio gets interrupted by the user speaking early.
     messages.append({"role": "assistant", "content": GREETING_TEXT})

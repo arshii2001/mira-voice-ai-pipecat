@@ -30,6 +30,8 @@ from pydantic import BaseModel
 from bot import (
     run_bot,
     get_text_injector,
+    load_system_prompt,
+    PROMPT_VERSION,
     DEFAULT_LANGUAGE,
     DEFAULT_VOICE,
     TTS_WS_URL,
@@ -133,6 +135,8 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     model: Optional[str] = None
     stream: Optional[bool] = True
+    user_name: Optional[str] = None
+    topic: Optional[str] = None
 
 @app.post("/chat")
 async def chat_completion(req: ChatRequest):
@@ -144,28 +148,21 @@ async def chat_completion(req: ChatRequest):
     base_url = LLM_BASE_URL
     model = req.model or LLM_MODEL
 
-    # System prompt for Mira tutor mode (with action commands)
+    # System prompt for Mira text tutor mode (composed from versioned files)
+    prompt_content = load_system_prompt(version=PROMPT_VERSION, mode="text")
+
+    # Inject dynamic student context if available
+    context_lines = []
+    if req.user_name:
+        context_lines.append(f"Name: {req.user_name}")
+    if req.topic:
+        context_lines.append(f"Topic: {req.topic}")
+    if context_lines:
+        prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
+
     system_msg = {
         "role": "system",
-        "content": (
-            "You are Mira, a friendly and knowledgeable AI learning companion. "
-            "You help students learn by explaining concepts clearly, using analogies, "
-            "and checking understanding. Be concise but thorough. "
-            "Use simple language and break down complex topics.\n\n"
-            "## STUDENT ACTION COMMANDS (respond appropriately)\n"
-            "- [TUTOR_ACTION: SUGGEST_TOPICS] — Suggest 4-5 interesting topics the student could explore next. "
-            "Base suggestions on the conversation so far, or if it's the start, suggest diverse engaging topics "
-            "suitable for a curious learner (science, history, math, language, arts). "
-            "Format each as a short, inviting question or statement.\n"
-            "- [TUTOR_ACTION: QUIZ] — Generate exactly 3 quick-check questions about what was just discussed. "
-            "Format: number each question, give 4 options (A-D), then reveal the correct answers at the end.\n"
-            "- [TUTOR_ACTION: SUMMARIZE] — Produce a concise summary of what was covered in this conversation. "
-            "List the key points and takeaways the student should remember.\n"
-            "- [TUTOR_ACTION: SIMPLIFY] — Re-explain the last concept more simply. "
-            "Use a different analogy, simpler words, or a concrete everyday example.\n\n"
-            "When you receive these commands, respond naturally — the student has clicked a button, "
-            "so don't echo the command back. Just provide the requested content directly."
-        )
+        "content": prompt_content,
     }
 
     messages = [system_msg] + [{"role": m.role, "content": m.content} for m in req.messages]
