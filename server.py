@@ -160,6 +160,15 @@ async def chat_completion(req: ChatRequest):
     if context_lines:
         prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
 
+    # Inject curriculum context if topic matches loaded curriculum
+    if req.topic:
+        from curriculum_manager import get_curriculum_manager
+        cm = get_curriculum_manager()
+        if cm.available:
+            curriculum_ctx = cm.get_context_for_topic(req.topic)
+            if curriculum_ctx:
+                prompt_content += "\n\n--- CURRICULUM CONTEXT ---\n" + curriculum_ctx + "\n"
+
     system_msg = {
         "role": "system",
         "content": prompt_content,

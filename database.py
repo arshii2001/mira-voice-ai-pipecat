@@ -138,6 +138,60 @@ class RecordingRecord:
         return asdict(self)
 
 
+# ── Persistence data classes ──────────────────────────────────────
+
+@dataclass
+class RoomRecord:
+    """Persisted room configuration."""
+    room_id: str
+    name: str
+    topic: Optional[str] = None
+    created_by: Optional[str] = None  # teacher user_id
+    created_by_name: Optional[str] = None  # teacher display name
+    settings_json: str = "{}"
+    is_permanent: bool = False
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["settings"] = json.loads(self.settings_json) if self.settings_json else {}
+        return d
+
+
+@dataclass
+class UserProfileRecord:
+    """Persisted user profile — remembers name, language, preferences."""
+    user_id: str
+    display_name: str
+    preferred_language: str = "en"
+    role: str = "student"  # "teacher" | "student"
+    settings_json: str = "{}"
+    created_at: float = 0.0
+    last_seen: float = 0.0
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["settings"] = json.loads(self.settings_json) if self.settings_json else {}
+        return d
+
+
+@dataclass
+class RoomMemberRecord:
+    """Persisted room membership — who belongs to which room."""
+    room_id: str
+    user_id: str
+    display_name: str
+    language: str = "en"
+    role: str = "student"  # "teacher" | "student" | "observer"
+    mode: str = "text_only"  # "text_only" | "text_and_audio"
+    joined_at: float = 0.0
+    last_active: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Database Manager
 # ─────────────────────────────────────────────────────────────────────
@@ -217,6 +271,48 @@ CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);
+
+-- ── Persistence tables (rooms, users, memberships) ──
+
+CREATE TABLE IF NOT EXISTS rooms (
+    room_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT 'Classroom',
+    topic TEXT,
+    created_by TEXT,
+    created_by_name TEXT,
+    settings_json TEXT DEFAULT '{}',
+    is_permanent INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    preferred_language TEXT DEFAULT 'en',
+    role TEXT DEFAULT 'student',
+    settings_json TEXT DEFAULT '{}',
+    created_at REAL NOT NULL,
+    last_seen REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS room_members (
+    room_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    language TEXT DEFAULT 'en',
+    role TEXT DEFAULT 'student',
+    mode TEXT DEFAULT 'text_only',
+    joined_at REAL NOT NULL,
+    last_active REAL NOT NULL,
+    PRIMARY KEY (room_id, user_id),
+    FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);
+CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);
 """
 
 
@@ -567,6 +663,207 @@ class ClassroomDB:
         ) as cursor:
             rows = await cursor.fetchall()
             return [RecordingRecord(**dict(row)) for row in rows]
+
+    # ── Rooms (Persistence) ────────────────────────────────────────
+
+    async def save_room(self, room_id: str, name: str, topic: str = None,
+                        created_by: str = None, created_by_name: str = None,
+                        settings: dict = None, is_permanent: bool = False) -> RoomRecord:
+        """Upsert a room configuration."""
+        now = time.time()
+        rec = RoomRecord(
+            room_id=room_id, name=name, topic=topic,
+            created_by=created_by, created_by_name=created_by_name,
+            settings_json=json.dumps(settings or {}),
+            is_permanent=is_permanent,
+            created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            """INSERT INTO rooms (room_id, name, topic, created_by, created_by_name,
+               settings_json, is_permanent, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(room_id) DO UPDATE SET
+                   name=excluded.name, topic=excluded.topic,
+                   created_by=excluded.created_by, created_by_name=excluded.created_by_name,
+                   settings_json=excluded.settings_json, is_permanent=excluded.is_permanent,
+                   updated_at=excluded.updated_at""",
+            (rec.room_id, rec.name, rec.topic, rec.created_by, rec.created_by_name,
+             rec.settings_json, int(rec.is_permanent), rec.created_at, rec.updated_at),
+        )
+        await self._db.commit()
+        logger.info(f"[DB] Room saved: {room_id} ({name})")
+        return rec
+
+    async def update_room(self, room_id: str, **kwargs):
+        """Update specific room fields."""
+        allowed = {"name", "topic", "created_by", "created_by_name", "settings_json", "is_permanent"}
+        updates = []
+        params = []
+        for k, v in kwargs.items():
+            if k in allowed:
+                if k == "is_permanent":
+                    v = int(v)
+                updates.append(f"{k} = ?")
+                params.append(v)
+        if updates:
+            updates.append("updated_at = ?")
+            params.append(time.time())
+            params.append(room_id)
+            await self._db.execute(
+                f"UPDATE rooms SET {', '.join(updates)} WHERE room_id = ?", params
+            )
+            await self._db.commit()
+
+    async def get_room(self, room_id: str) -> Optional[RoomRecord]:
+        """Get a persisted room by ID."""
+        async with self._db.execute(
+            "SELECT * FROM rooms WHERE room_id = ?", (room_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                d = dict(row)
+                d["is_permanent"] = bool(d.get("is_permanent", 0))
+                return RoomRecord(**d)
+        return None
+
+    async def list_rooms(self) -> List[RoomRecord]:
+        """List all persisted rooms."""
+        async with self._db.execute(
+            "SELECT * FROM rooms ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            result = []
+            for row in rows:
+                d = dict(row)
+                d["is_permanent"] = bool(d.get("is_permanent", 0))
+                result.append(RoomRecord(**d))
+            return result
+
+    async def delete_room(self, room_id: str):
+        """Delete a room and its memberships from the DB."""
+        await self._db.execute("DELETE FROM room_members WHERE room_id = ?", (room_id,))
+        await self._db.execute("DELETE FROM rooms WHERE room_id = ?", (room_id,))
+        await self._db.commit()
+        logger.info(f"[DB] Room deleted: {room_id}")
+
+    # ── User Profiles (Persistence) ──────────────────────────────
+
+    async def upsert_user_profile(self, user_id: str, display_name: str,
+                                   preferred_language: str = "en",
+                                   role: str = "student",
+                                   settings: dict = None) -> UserProfileRecord:
+        """Create or update a user profile."""
+        now = time.time()
+        rec = UserProfileRecord(
+            user_id=user_id, display_name=display_name,
+            preferred_language=preferred_language, role=role,
+            settings_json=json.dumps(settings or {}),
+            created_at=now, last_seen=now,
+        )
+        await self._db.execute(
+            """INSERT INTO user_profiles (user_id, display_name, preferred_language, role,
+               settings_json, created_at, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   display_name=excluded.display_name,
+                   preferred_language=excluded.preferred_language,
+                   role=excluded.role,
+                   settings_json=excluded.settings_json,
+                   last_seen=excluded.last_seen""",
+            (rec.user_id, rec.display_name, rec.preferred_language, rec.role,
+             rec.settings_json, rec.created_at, rec.last_seen),
+        )
+        await self._db.commit()
+        return rec
+
+    async def get_user_profile(self, user_id: str) -> Optional[UserProfileRecord]:
+        """Get a user profile by ID."""
+        async with self._db.execute(
+            "SELECT * FROM user_profiles WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return UserProfileRecord(**dict(row))
+        return None
+
+    async def list_user_profiles(self) -> List[UserProfileRecord]:
+        """List all user profiles."""
+        async with self._db.execute(
+            "SELECT * FROM user_profiles ORDER BY last_seen DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [UserProfileRecord(**dict(row)) for row in rows]
+
+    async def touch_user(self, user_id: str):
+        """Update last_seen timestamp."""
+        await self._db.execute(
+            "UPDATE user_profiles SET last_seen = ? WHERE user_id = ?",
+            (time.time(), user_id),
+        )
+        await self._db.commit()
+
+    # ── Room Members (Persistence) ───────────────────────────────
+
+    async def upsert_room_member(self, room_id: str, user_id: str,
+                                  display_name: str, language: str = "en",
+                                  role: str = "student",
+                                  mode: str = "text_only") -> RoomMemberRecord:
+        """Add or update a room member."""
+        now = time.time()
+        rec = RoomMemberRecord(
+            room_id=room_id, user_id=user_id, display_name=display_name,
+            language=language, role=role, mode=mode,
+            joined_at=now, last_active=now,
+        )
+        await self._db.execute(
+            """INSERT INTO room_members (room_id, user_id, display_name, language, role, mode,
+               joined_at, last_active)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(room_id, user_id) DO UPDATE SET
+                   display_name=excluded.display_name,
+                   language=excluded.language,
+                   role=excluded.role,
+                   mode=excluded.mode,
+                   last_active=excluded.last_active""",
+            (rec.room_id, rec.user_id, rec.display_name, rec.language,
+             rec.role, rec.mode, rec.joined_at, rec.last_active),
+        )
+        await self._db.commit()
+        return rec
+
+    async def get_room_members(self, room_id: str) -> List[RoomMemberRecord]:
+        """Get all members of a room."""
+        async with self._db.execute(
+            "SELECT * FROM room_members WHERE room_id = ? ORDER BY joined_at ASC",
+            (room_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [RoomMemberRecord(**dict(row)) for row in rows]
+
+    async def get_user_rooms(self, user_id: str) -> List[RoomMemberRecord]:
+        """Get all rooms a user belongs to."""
+        async with self._db.execute(
+            "SELECT * FROM room_members WHERE user_id = ? ORDER BY last_active DESC",
+            (user_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [RoomMemberRecord(**dict(row)) for row in rows]
+
+    async def remove_room_member(self, room_id: str, user_id: str):
+        """Remove a member from a room."""
+        await self._db.execute(
+            "DELETE FROM room_members WHERE room_id = ? AND user_id = ?",
+            (room_id, user_id),
+        )
+        await self._db.commit()
+
+    async def touch_room_member(self, room_id: str, user_id: str):
+        """Update last_active timestamp for a room member."""
+        await self._db.execute(
+            "UPDATE room_members SET last_active = ? WHERE room_id = ? AND user_id = ?",
+            (time.time(), room_id, user_id),
+        )
+        await self._db.commit()
 
     # ── Dashboard Queries ─────────────────────────────────────────
 

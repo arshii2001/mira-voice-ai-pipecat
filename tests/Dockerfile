@@ -26,6 +26,8 @@ COPY database.py /app/
 COPY translator.py /app/
 COPY bot.py /app/
 COPY server.py /app/
+COPY services/ /app/services/
+COPY prompts/ /app/prompts/
 
 ENTRYPOINT ["python"]
 CMD ["tests/test_rtvi.py", "--test", "all"]

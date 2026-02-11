@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Ensure default curriculum data is available (can be overridden by volume mount)
+RUN mkdir -p /content/curriculum
+COPY content/curriculum/ /content/curriculum/
+
 # Copy and setup entrypoint script
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh

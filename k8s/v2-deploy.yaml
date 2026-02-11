@@ -25,6 +25,8 @@ data:
   PORT: "7860"
   LOG_LEVEL: "INFO"
   PROMPT_VERSION: "v3"
+  CURRICULUM_DIR: "/content/curriculum"
+  CURRICULUM_CONTEXT_MAX_TOKENS: "600"
 
 ---
 # ── OpenWebUI v2 ConfigMap ───────────────────────────────────
@@ -139,6 +141,19 @@ spec:
                 configMapKeyRef:
                   name: pipecat-v2-config
                   key: PROMPT_VERSION
+            - name: CURRICULUM_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: CURRICULUM_DIR
+            - name: CURRICULUM_CONTEXT_MAX_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: CURRICULUM_CONTEXT_MAX_TOKENS
+          volumeMounts:
+            - name: curriculum-data
+              mountPath: /content/curriculum
           resources:
             requests:
               cpu: 500m
@@ -159,6 +174,26 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
+      volumes:
+        - name: curriculum-data
+          persistentVolumeClaim:
+            claimName: curriculum-data-pvc
+
+---
+# ── Curriculum PVC ────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: curriculum-data-pvc
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 
 ---
 # ── Pipecat v2 ClusterIP Service ────────────────────────────

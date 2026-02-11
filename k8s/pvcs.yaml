@@ -29,3 +29,19 @@ spec:
   resources:
     requests:
       storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: curriculum-data
+  namespace: mira
+  labels:
+    app.kubernetes.io/part-of: mira
+    app.kubernetes.io/component: voice-backend
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 1Gi

@@ -447,6 +447,7 @@ class RoomManager:
 
         Composes base + classroom prompt from versioned files.
         Appends dynamic student context (topic, speaker name).
+        Appends curriculum context if a topic matches loaded curriculum.
         """
         prompt = load_system_prompt(version=PROMPT_VERSION, mode="classroom")
 
@@ -460,6 +461,19 @@ class RoomManager:
 
         if context_lines:
             prompt += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
+
+        # Append curriculum context if topic matches
+        if room and room.current_lesson_topic:
+            from curriculum_manager import get_curriculum_manager
+            cm = get_curriculum_manager()
+            if cm.available:
+                curriculum_ctx = cm.get_context_for_topic(
+                    room.current_lesson_topic,
+                    language=room.users[room.speaker_id].language if room and room.speaker_id and room.speaker_id in room.users else "english",
+                )
+                if curriculum_ctx:
+                    prompt += "\n\n--- CURRICULUM CONTEXT ---\n" + curriculum_ctx + "\n"
+                    logger.debug(f"[CURRICULUM] Injected {len(curriculum_ctx)} chars for topic: {room.current_lesson_topic}")
 
         return prompt
 
@@ -850,12 +864,84 @@ class RoomManager:
             return None
 
     async def init_db(self):
-        """Initialize the database (called from server lifespan)."""
+        """Initialize the database and hydrate rooms from persisted state."""
         await classroom_db.init()
         logger.info("[CLASSROOM] Database initialized")
 
+        # Hydrate rooms from DB
+        await self._hydrate_rooms_from_db()
+
+    async def _hydrate_rooms_from_db(self):
+        """Load all persisted rooms from the database into memory."""
+        try:
+            room_records = await classroom_db.list_rooms()
+            loaded_count = 0
+            for rec in room_records:
+                if rec.room_id in self._rooms:
+                    # Already in memory (e.g. default room) — update metadata
+                    room = self._rooms[rec.room_id]
+                    room.name = rec.name
+                    room.topic = rec.topic
+                    room.current_lesson_topic = rec.topic
+                    room.teacher_id = rec.created_by
+                    if rec.is_permanent:
+                        self._permanent_rooms.add(rec.room_id)
+                else:
+                    # Create in-memory room from DB record
+                    room = Room(
+                        room_id=rec.room_id,
+                        name=rec.name,
+                        created_at=rec.created_at,
+                        topic=rec.topic,
+                        current_lesson_topic=rec.topic,
+                        teacher_id=rec.created_by,
+                    )
+                    self._rooms[rec.room_id] = room
+                    if rec.is_permanent:
+                        self._permanent_rooms.add(rec.room_id)
+
+                # Load persisted members for this room (for reconnect lookup)
+                members = await classroom_db.get_room_members(rec.room_id)
+                for m in members:
+                    # Store in _disconnected_users so reconnecting users get their profile back
+                    room._disconnected_users[m.user_id] = {
+                        "name": m.display_name,
+                        "language": m.language,
+                        "mode": m.mode,
+                        "is_speaker": m.role == "teacher",
+                        "disconnected_at": m.last_active,
+                        "persisted_role": m.role,
+                    }
+
+                # Load recent conversation history from DB (last 20 messages)
+                recent_msgs = await classroom_db.get_messages_by_room(rec.room_id, limit=20)
+                if recent_msgs:
+                    room.conversation_history = [
+                        {"role": msg.role, "content": msg.content}
+                        for msg in recent_msgs
+                    ]
+                    logger.info(
+                        f"[CLASSROOM] Loaded {len(recent_msgs)} messages for room {rec.room_id}"
+                    )
+
+                loaded_count += 1
+
+            logger.info(f"[CLASSROOM] Hydrated {loaded_count} rooms from database")
+
+            # Ensure default room exists in DB too
+            if DEFAULT_ROOM_ID not in [r.room_id for r in room_records]:
+                await classroom_db.save_room(
+                    room_id=DEFAULT_ROOM_ID,
+                    name=DEFAULT_ROOM_NAME,
+                    is_permanent=True,
+                )
+                logger.info(f"[CLASSROOM] Persisted default room to DB: {DEFAULT_ROOM_ID}")
+
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to hydrate rooms from DB: {e}")
+
     def _create_default_room(self):
-        """Create a permanent default room that persists even when empty."""
+        """Create a permanent default room in memory (DB persistence happens in init_db)."""
         room = Room(room_id=DEFAULT_ROOM_ID, name=DEFAULT_ROOM_NAME)
         self._rooms[DEFAULT_ROOM_ID] = room
         self._permanent_rooms.add(DEFAULT_ROOM_ID)
@@ -1115,11 +1201,27 @@ class RoomManager:
 
     # ── Room CRUD ──
 
-    def create_room(self, name: str = "Classroom", teacher_id: Optional[str] = None) -> Room:
-        """Create a new room. The creator becomes the teacher."""
+    async def create_room(self, name: str = "Classroom", teacher_id: Optional[str] = None,
+                          teacher_name: Optional[str] = None, topic: Optional[str] = None,
+                          is_permanent: bool = False) -> Room:
+        """Create a new room and persist it to DB. The creator becomes the teacher."""
         room_id = str(uuid.uuid4())[:8]
-        room = Room(room_id=room_id, name=name, teacher_id=teacher_id)
+        room = Room(room_id=room_id, name=name, teacher_id=teacher_id,
+                     current_lesson_topic=topic, topic=topic)
         self._rooms[room_id] = room
+        if is_permanent:
+            self._permanent_rooms.add(room_id)
+
+        # Persist to DB
+        try:
+            await classroom_db.save_room(
+                room_id=room_id, name=name, topic=topic,
+                created_by=teacher_id, created_by_name=teacher_name,
+                is_permanent=is_permanent,
+            )
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to persist room to DB: {e}")
+
         logger.info(f"[CLASSROOM] Room created: {room_id} ({name}) teacher={teacher_id}")
         return room
 
@@ -1131,13 +1233,18 @@ class RoomManager:
         """List all active rooms."""
         return [room.to_dict() for room in self._rooms.values()]
 
-    def delete_room(self, room_id: str) -> bool:
+    async def delete_room(self, room_id: str) -> bool:
         """Delete a room. Permanent rooms cannot be deleted."""
         if room_id in self._permanent_rooms:
             logger.info(f"[CLASSROOM] Skipping delete of permanent room: {room_id}")
             return False
         if room_id in self._rooms:
             del self._rooms[room_id]
+            # Remove from DB
+            try:
+                await classroom_db.delete_room(room_id)
+            except Exception as e:
+                logger.error(f"[CLASSROOM] Failed to delete room from DB: {e}")
             logger.info(f"[CLASSROOM] Room deleted: {room_id}")
             return True
         return False
@@ -1156,12 +1263,13 @@ class RoomManager:
         if not room:
             return False
 
-        # Check if this is a reconnecting user
+        # Check if this is a reconnecting user (from memory or DB-hydrated)
         is_reconnect = user.user_id in room._disconnected_users
         prev_state = room._disconnected_users.pop(user.user_id, None)
 
         if is_reconnect and prev_state:
             was_speaker = prev_state.get("is_speaker", False)
+            persisted_role = prev_state.get("persisted_role")
             logger.info(
                 f"[CLASSROOM] User {user.name} ({user.user_id}) RECONNECTED to room {room_id} "
                 f"[lang={user.language}] (was_speaker={was_speaker})"
@@ -1177,7 +1285,28 @@ class RoomManager:
                 user.is_speaker = True
                 room.speaker_id = user.user_id
                 logger.info(f"[CLASSROOM] Speaker role RESTORED for {user.name} ({user.user_id})")
+
+            # If this is a DB-hydrated reconnect (server restart), restore teacher_id
+            if persisted_role == "teacher" and room.teacher_id is None:
+                room.teacher_id = user.user_id
+                logger.info(f"[CLASSROOM] Teacher role RESTORED from DB for {user.name}")
         else:
+            # Check if user profile exists in DB (first time in this room but known user)
+            try:
+                profile = await classroom_db.get_user_profile(user.user_id)
+                if profile:
+                    # Use DB name/language if the user didn't override them
+                    if user.name == f"User-{user.user_id[:4]}":
+                        user.name = profile.display_name
+                    if user.language == "en" and profile.preferred_language != "en":
+                        user.language = profile.preferred_language
+                    logger.info(
+                        f"[CLASSROOM] Loaded profile for {user.name} ({user.user_id}) "
+                        f"from DB [lang={user.language}]"
+                    )
+            except Exception as e:
+                logger.debug(f"[CLASSROOM] Could not load user profile: {e}")
+
             logger.info(
                 f"[CLASSROOM] User {user.name} ({user.user_id}) joined room {room_id} "
                 f"[lang={user.language}]"
@@ -1187,6 +1316,28 @@ class RoomManager:
 
         # Ensure DB session exists
         asyncio.create_task(self._ensure_session(room))
+
+        # Persist user profile and room membership (fire-and-forget)
+        async def _persist_user():
+            try:
+                role = "teacher" if user.user_id == room.teacher_id else "student"
+                await classroom_db.upsert_user_profile(
+                    user_id=user.user_id,
+                    display_name=user.name,
+                    preferred_language=user.language,
+                    role=role,
+                )
+                await classroom_db.upsert_room_member(
+                    room_id=room_id,
+                    user_id=user.user_id,
+                    display_name=user.name,
+                    language=user.language,
+                    role=role,
+                    mode=user.mode,
+                )
+            except Exception as e:
+                logger.error(f"[CLASSROOM] Failed to persist user: {e}")
+        asyncio.create_task(_persist_user())
 
         # Update participant count in DB
         async def _update_stats():
@@ -1267,6 +1418,15 @@ class RoomManager:
             "disconnected_at": time.time(),
         }
 
+        # Update last_active in DB (fire-and-forget)
+        async def _touch():
+            try:
+                await classroom_db.touch_room_member(room_id, user_id)
+                await classroom_db.touch_user(user_id)
+            except Exception:
+                pass
+        asyncio.create_task(_touch())
+
         # Remove from token queue
         if user_id in room.token_queue:
             room.token_queue.remove(user_id)
@@ -1295,7 +1455,7 @@ class RoomManager:
         # Don't delete room during grace period — check after grace expires
         if not room.users and not room._grace_speaker_id:
             await self._end_session(room)
-            self.delete_room(room_id)
+            await self.delete_room(room_id)
 
     async def _speaker_grace_timeout(self, room: Room, user_id: str):
         """After grace period, if speaker hasn't reconnected, reassign token."""
@@ -1321,7 +1481,7 @@ class RoomManager:
             elif not room.users:
                 # Room is empty now
                 await self._end_session(room)
-                self.delete_room(room.room_id)
+                await self.delete_room(room.room_id)
 
     # ── Speaker token ──
 
@@ -1767,9 +1927,14 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 
 
 @router.post("/rooms")
-async def create_room(name: str = "Classroom", teacher_id: str = None):
+async def create_room(name: str = "Classroom", teacher_id: str = None,
+                      teacher_name: str = None, topic: str = None,
+                      is_permanent: bool = False):
     """Create a new classroom room. The creator becomes the teacher."""
-    room = room_manager.create_room(name=name, teacher_id=teacher_id)
+    room = await room_manager.create_room(
+        name=name, teacher_id=teacher_id, teacher_name=teacher_name,
+        topic=topic, is_permanent=is_permanent,
+    )
     return room.to_dict()
 
 
@@ -1791,7 +1956,7 @@ async def get_room(room_id: str):
 @router.delete("/rooms/{room_id}")
 async def delete_room(room_id: str):
     """Delete a room."""
-    if room_manager.delete_room(room_id):
+    if await room_manager.delete_room(room_id):
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="Room not found")
 
@@ -1880,6 +2045,175 @@ async def get_dashboard(room_id: str = None):
     return stats
 
 
+# ── User Profile Endpoints ──
+
+@router.get("/users")
+async def list_users():
+    """List all known user profiles."""
+    profiles = await classroom_db.list_user_profiles()
+    return {"users": [p.to_dict() for p in profiles]}
+
+
+@router.get("/users/{user_id}")
+async def get_user(user_id: str):
+    """Get a user profile."""
+    profile = await classroom_db.get_user_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Also return which rooms they belong to
+    memberships = await classroom_db.get_user_rooms(user_id)
+    return {
+        "profile": profile.to_dict(),
+        "rooms": [m.to_dict() for m in memberships],
+    }
+
+
+@router.put("/users/{user_id}")
+async def update_user(user_id: str, display_name: str = None,
+                      preferred_language: str = None, role: str = None):
+    """Update a user profile."""
+    profile = await classroom_db.get_user_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    await classroom_db.upsert_user_profile(
+        user_id=user_id,
+        display_name=display_name or profile.display_name,
+        preferred_language=preferred_language or profile.preferred_language,
+        role=role or profile.role,
+    )
+    updated = await classroom_db.get_user_profile(user_id)
+    return updated.to_dict()
+
+
+@router.post("/users")
+async def create_user(user_id: str, display_name: str, preferred_language: str = "en",
+                      role: str = "student"):
+    """Create or update a user profile."""
+    profile = await classroom_db.upsert_user_profile(
+        user_id=user_id,
+        display_name=display_name,
+        preferred_language=preferred_language,
+        role=role,
+    )
+    return profile.to_dict()
+
+
+# ── Room Update Endpoint ──
+
+@router.put("/rooms/{room_id}")
+async def update_room(room_id: str, name: str = None, topic: str = None,
+                      teacher_id: str = None, is_permanent: bool = None):
+    """Update room configuration."""
+    room = room_manager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    # Update in-memory
+    if name is not None:
+        room.name = name
+    if topic is not None:
+        room.topic = topic
+        room.current_lesson_topic = topic
+    if teacher_id is not None:
+        room.teacher_id = teacher_id
+    if is_permanent is not None:
+        if is_permanent:
+            room_manager._permanent_rooms.add(room_id)
+        else:
+            room_manager._permanent_rooms.discard(room_id)
+
+    # Persist to DB
+    kwargs = {}
+    if name is not None:
+        kwargs["name"] = name
+    if topic is not None:
+        kwargs["topic"] = topic
+    if teacher_id is not None:
+        kwargs["created_by"] = teacher_id
+    if is_permanent is not None:
+        kwargs["is_permanent"] = is_permanent
+    if kwargs:
+        await classroom_db.update_room(room_id, **kwargs)
+
+    return room.to_dict()
+
+
+# ── Curriculum Endpoints ──
+
+@router.get("/curriculum/files")
+async def list_curriculum_files():
+    """List available curriculum files with metadata."""
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    return {"files": cm.list_files(), "available": cm.available}
+
+
+@router.get("/curriculum/topics")
+async def get_curriculum_topics(filename: str = None):
+    """Get browseable chapter -> section -> concepts tree for the topic picker.
+
+    Optional query param `filename` to filter to a single curriculum file.
+    """
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    tree = cm.get_browseable_tree(filename)
+    return {"tree": tree}
+
+
+@router.get("/curriculum/search")
+async def search_curriculum_concepts(q: str, limit: int = 20):
+    """Search concepts by name (case-insensitive substring match)."""
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    results = cm.search_concepts(q, limit=limit)
+    return {"results": results, "query": q}
+
+
+@router.get("/curriculum/concept/{concept_name}")
+async def get_curriculum_concept(concept_name: str):
+    """Get full concept detail from the concept registry."""
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    detail = cm.get_concept_detail(concept_name)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Concept not found")
+    return detail
+
+
+@router.get("/curriculum/context/{topic}")
+async def get_curriculum_context(topic: str, max_tokens: int = None, language: str = "english"):
+    """Preview the curriculum context block that would be injected for a topic."""
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    ctx = cm.get_context_for_topic(topic, max_tokens=max_tokens, language=language)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="No curriculum found for this topic")
+    return {"topic": topic, "context": ctx, "char_count": len(ctx)}
+
+
+# ── Room Members Endpoint ──
+
+@router.get("/rooms/{room_id}/members")
+async def get_room_members(room_id: str):
+    """Get persisted members of a room (includes offline users)."""
+    room = room_manager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    # Get persisted members from DB
+    db_members = await classroom_db.get_room_members(room_id)
+
+    # Merge with live status
+    result = []
+    for m in db_members:
+        d = m.to_dict()
+        d["is_online"] = m.user_id in room.users
+        d["is_speaker"] = room.speaker_id == m.user_id
+        result.append(d)
+
+    return {"members": result, "online_count": len(room.users)}
+
+
 @router.websocket("/rooms/{room_id}/ws")
 async def classroom_websocket(websocket: WebSocket, room_id: str):
     """
@@ -1936,20 +2270,21 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             logger.info(f"[CLASSROOM] {name} ({user_id}) is now the teacher of room {room_id}")
 
         # Add to room (does NOT auto-assign token yet)
+        # Note: add_user may update user.name and user.language from DB profile
         if not await room_manager.add_user(room_id, user):
             await websocket.send_json({"type": "error", "message": "Failed to join room"})
             await websocket.close()
             return
 
-        # Send room state to new user FIRST
+        # Send room state to new user FIRST (use user object which may have been updated from DB)
         await websocket.send_json({
             "type": "joined",
             "room": room.to_dict(),
             "you": {
                 "user_id": user_id,
-                "name": name,
-                "language": language,
-                "mode": mode,
+                "name": user.name,
+                "language": user.language,
+                "mode": user.mode,
                 "is_speaker": user.is_speaker,
                 "is_teacher": user_id == room.teacher_id,
             },
@@ -2020,10 +2355,71 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     await websocket.send_json({"type": "error", "message": "Only the teacher can use lesson controls"})
                     continue
 
+                # ── Non-LLM teacher actions (KICK, PROMOTE_TEACHER) ──
+                if action == "KICK":
+                    target_user_id = payload
+                    if not target_user_id or target_user_id == user.user_id:
+                        await websocket.send_json({"type": "error", "message": "Invalid kick target"})
+                        continue
+                    target = room.users.get(target_user_id)
+                    if not target:
+                        await websocket.send_json({"type": "error", "message": "User not in room"})
+                        continue
+                    target_name = target.name
+                    # Close the kicked user's WebSocket (triggers remove_user in finally block)
+                    try:
+                        await room_manager._send_json(target.websocket, {
+                            "type": "kicked",
+                            "message": f"You were removed from the room by the teacher"
+                        })
+                        await target.websocket.close(code=4001, reason="Kicked by teacher")
+                    except Exception as kick_err:
+                        logger.debug(f"[CLASSROOM] Error closing kicked user WS: {kick_err}")
+                    logger.info(f"[CLASSROOM] Teacher {user.name} kicked {target_name} from {room_id}")
+                    await websocket.send_json({"type": "teacher_action_result", "action": "KICK", "success": True, "target": target_name})
+                    continue
+
+                elif action == "PROMOTE_TEACHER":
+                    target_user_id = payload
+                    if not target_user_id:
+                        await websocket.send_json({"type": "error", "message": "No user specified for promotion"})
+                        continue
+                    target = room.users.get(target_user_id)
+                    if not target:
+                        await websocket.send_json({"type": "error", "message": "User not in room"})
+                        continue
+                    old_teacher_id = room.teacher_id
+                    room.teacher_id = target_user_id
+                    # Persist to DB
+                    try:
+                        await classroom_db.update_room(room_id, created_by=target_user_id)
+                        # Update roles in room_members table
+                        await classroom_db.upsert_room_member(room_id, target_user_id, target.name, target.language, role="teacher", mode=target.mode)
+                        if old_teacher_id and old_teacher_id in room.users:
+                            old_teacher = room.users[old_teacher_id]
+                            await classroom_db.upsert_room_member(room_id, old_teacher_id, old_teacher.name, old_teacher.language, role="student", mode=old_teacher.mode)
+                    except Exception as e:
+                        logger.error(f"[CLASSROOM] Failed to persist teacher change: {e}")
+                    # Broadcast teacher change to all users
+                    await room_manager._broadcast_json(room, {
+                        "type": "teacher_changed",
+                        "teacher_id": target_user_id,
+                        "teacher_name": target.name,
+                    })
+                    logger.info(f"[CLASSROOM] Teacher changed: {user.name} -> {target.name} in room {room_id}")
+                    continue
+
+                # ── LLM-based teacher actions ──
                 # Build the teacher action command
                 if action == "SET_TOPIC":
                     teacher_cmd = f"[TEACHER_ACTION: SET_TOPIC {payload}]"
                     room.current_lesson_topic = payload
+                    room.topic = payload
+                    # Persist topic to DB
+                    try:
+                        await classroom_db.update_room(room_id, topic=payload)
+                    except Exception as e:
+                        logger.error(f"[CLASSROOM] Failed to persist topic: {e}")
                     # Notify all users of the topic change
                     await room_manager._broadcast_json(room, {
                         "type": "lesson_topic_changed",

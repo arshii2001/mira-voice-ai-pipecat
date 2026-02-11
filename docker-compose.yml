@@ -29,9 +29,12 @@ services:
       - HOST=0.0.0.0
       - PORT=7860
       - LOG_LEVEL=DEBUG
+      - CURRICULUM_DIR=/content/curriculum
+      - CURRICULUM_CONTEXT_MAX_TOKENS=600
     volumes:
       - ./prompts:/app/prompts:ro
       - classroom-data:/app/data
+      - ./content/curriculum:/content/curriculum:ro
     networks:
       - mira-network
     restart: unless-stopped

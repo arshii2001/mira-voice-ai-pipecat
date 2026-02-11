@@ -1,0 +1,487 @@
+{
+  "textbook_hierarchy": [
+    {
+      "chapter_id": "chapter_1",
+      "title": "Life Processes",
+      "summary_english": "This chapter covers the essential life processes that maintain living organisms, including nutrition, respiration, transportation, and excretion. Students learn how autotrophs and heterotrophs obtain energy, how gases are exchanged, and how waste products are removed.",
+      "summary_hindi": "यह अध्याय जीवन प्रक्रियाओं को शामिल करता है जो जीवित जीवों को बनाए रखती हैं, जिसमें पोषण, श्वसन, परिवहन और उत्सर्जन शामिल हैं।",
+      "summary_tamil": "இந்த அத்தியாயம் உயிரினங்களை நிலைநிறுத்தும் அத்தியாவசிய உயிர் செயல்முறைகளை உள்ளடக்கியது.",
+      "faqs": [
+        {"question": "What is the role of chlorophyll in photosynthesis?", "answer": "Chlorophyll is a green pigment found in chloroplasts that absorbs sunlight energy. This energy is used to split water molecules and convert carbon dioxide into glucose through a series of chemical reactions."},
+        {"question": "Why is photosynthesis important for all life on Earth?", "answer": "Photosynthesis produces oxygen that most organisms need for respiration, and it creates glucose which is the base of most food chains. Without photosynthesis, there would be no food or oxygen for animals."},
+        {"question": "What is the difference between autotrophs and heterotrophs?", "answer": "Autotrophs can make their own food using sunlight or chemical energy (like green plants). Heterotrophs cannot make their own food and must consume other organisms for nutrition (like animals and fungi)."},
+        {"question": "How do stomata help in gas exchange?", "answer": "Stomata are tiny pores on leaf surfaces that open and close to allow carbon dioxide in for photosynthesis and release oxygen. Guard cells control their opening based on light and water availability."}
+      ],
+      "followups": [
+        "Can you explain the light and dark reactions of photosynthesis?",
+        "How do desert plants perform photosynthesis differently?",
+        "What happens to glucose after it is made in photosynthesis?",
+        "How are respiration and photosynthesis related?"
+      ],
+      "ncert_refs": ["#/texts/0"],
+      "sections": [
+        {
+          "section_id": "section_chapter_1_1",
+          "title": "Nutrition in Plants",
+          "summary_english": "Plants are autotrophs that make their own food through photosynthesis. Carbon dioxide from the air enters through stomata, water is absorbed by roots, and sunlight provides energy. Chlorophyll in leaves captures light energy to convert CO2 and water into glucose and oxygen.",
+          "concepts": ["Photosynthesis", "Chlorophyll", "Stomata", "Autotrophic Nutrition"],
+          "text_blocks": [
+            {
+              "text_block_id": "TB_chapter_1_001",
+              "original_text": "The leaves of a plant are the food factories. The synthesis of food in plants occurs in leaves. The leaves have a green pigment called chlorophyll. Chlorophyll helps leaves to capture the energy of the sunlight. This energy is used to synthesise food from carbon dioxide and water. Since the synthesis of food occurs in the presence of sunlight, it is called photosynthesis. The word photosynthesis is made up of two words: photo = light; synthesis = to combine.",
+              "summary_english": "Leaves are food factories of plants. Chlorophyll captures sunlight energy to combine CO2 and water into food through photosynthesis (photo=light, synthesis=combine).",
+              "summary_hindi": "पत्तियाँ पौधों की खाद्य फैक्ट्रियाँ हैं। क्लोरोफिल सूर्य की ऊर्जा को ग्रहण करता है और CO2 तथा पानी को मिलाकर भोजन बनाता है, इसे प्रकाश संश्लेषण कहते हैं।",
+              "summary_tamil": "இலைகள் தாவரங்களின் உணவு தொழிற்சாலைகள். பச்சையம் சூரிய ஒளியை உறிஞ்சி CO2 மற்றும் நீரை உணவாக மாற்றுகிறது.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Photosynthesis", "Chlorophyll"]
+            },
+            {
+              "text_block_id": "TB_chapter_1_002",
+              "original_text": "Besides leaves, photosynthesis also takes place in other green parts of the plant, such as in stems and green branches. The desert plants have a special adaptation. In cactus, the stem is green and performs photosynthesis. The leaves are reduced to spines to prevent water loss. Carbon dioxide from the atmosphere is taken in through the tiny pores present on the surface of the leaves. These pores are called stomata. These pores are surrounded by guard cells.",
+              "summary_english": "Photosynthesis can occur in any green part of a plant, not just leaves. Cacti use green stems for photosynthesis while leaves are reduced to spines. Stomata are tiny pores on leaves surrounded by guard cells that let CO2 in.",
+              "summary_hindi": "प्रकाश संश्लेषण पौधे के किसी भी हरे भाग में हो सकता है। कैक्टस में तना हरा होता है और पत्तियाँ काँटों में बदल जाती हैं। रंध्र पत्तियों पर छोटे छिद्र हैं जो CO2 को अंदर आने देते हैं।",
+              "summary_tamil": "ஒளிச்சேர்க்கை தாவரத்தின் எந்த பச்சை பகுதியிலும் நடைபெறும். கற்றாழையில் தண்டு பச்சையாக இருக்கும். இலைத்துளைகள் CO2 உள்ளே வர அனுமதிக்கின்றன.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Photosynthesis", "Stomata"]
+            },
+            {
+              "text_block_id": "TB_chapter_1_003",
+              "original_text": "The equation for photosynthesis can be written as: 6CO2 + 6H2O → C6H12O6 + 6O2 (in the presence of sunlight and chlorophyll). Carbon dioxide + Water → Glucose + Oxygen. During this process, water molecules are split using light energy. This splitting of water is called photolysis. The hydrogen released is used to reduce carbon dioxide to carbohydrates.",
+              "summary_english": "The photosynthesis equation: 6CO2 + 6H2O → C6H12O6 + 6O2. Light energy splits water molecules (photolysis) and the hydrogen reduces CO2 into glucose.",
+              "summary_hindi": "प्रकाश संश्लेषण का समीकरण: 6CO2 + 6H2O → C6H12O6 + 6O2। प्रकाश ऊर्जा पानी के अणुओं को तोड़ती है (प्रकाश अपघटन) और हाइड्रोजन CO2 को ग्लूकोज में बदलता है।",
+              "summary_tamil": "ஒளிச்சேர்க்கை சமன்பாடு: 6CO2 + 6H2O → C6H12O6 + 6O2. ஒளி ஆற்றல் நீர் மூலக்கூறுகளை பிரிக்கிறது.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Photosynthesis", "Photolysis"]
+            }
+          ]
+        },
+        {
+          "section_id": "section_chapter_1_2",
+          "title": "Nutrition in Animals",
+          "summary_english": "Animals are heterotrophs that depend on other organisms for food. The human digestive system breaks down complex food into simpler substances through mechanical and chemical processes. Key organs include the mouth, stomach, small intestine, and large intestine.",
+          "concepts": ["Heterotrophic Nutrition", "Digestion", "Enzymes"],
+          "text_blocks": [
+            {
+              "text_block_id": "TB_chapter_1_004",
+              "original_text": "The alimentary canal is basically a long tube extending from the mouth to the anus. The food is taken in through the mouth. The teeth break down the food into small pieces. The saliva contains an enzyme called salivary amylase that breaks down starch into sugar. The food then goes down the oesophagus into the stomach. The stomach secretes hydrochloric acid and pepsin enzyme which digest proteins.",
+              "summary_english": "The alimentary canal runs from mouth to anus. Teeth mechanically break food, salivary amylase converts starch to sugar, and the stomach uses HCl and pepsin to digest proteins.",
+              "summary_hindi": "आहार नाल मुँह से गुदा तक जाती है। दाँत भोजन को तोड़ते हैं, लार एमाइलेज स्टार्च को शर्करा में बदलता है, और पेट HCl और पेप्सिन से प्रोटीन पचाता है।",
+              "summary_tamil": "உணவுக்குழாய் வாயிலிருந்து ஆசனவாய் வரை செல்கிறது. பற்கள் உணவை உடைக்கின்றன, உமிழ்நீர் அமிலேஸ் மாவுச்சத்தை சர்க்கரையாக மாற்றுகிறது.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Digestion", "Enzymes"]
+            }
+          ]
+        },
+        {
+          "section_id": "section_chapter_1_3",
+          "title": "Respiration",
+          "summary_english": "Respiration is the process by which organisms break down glucose to release energy. Aerobic respiration uses oxygen and produces CO2 and water. Anaerobic respiration occurs without oxygen, producing ethanol or lactic acid.",
+          "concepts": ["Aerobic Respiration", "Anaerobic Respiration", "ATP"],
+          "text_blocks": [
+            {
+              "text_block_id": "TB_chapter_1_005",
+              "original_text": "The food has energy stored in it. During digestion, the food is broken down into simpler substances. These substances are transported to cells where they are further broken down to release energy. The process of breaking down food to release energy is called cellular respiration. C6H12O6 + 6O2 → 6CO2 + 6H2O + Energy (ATP). This process takes place in the mitochondria of cells.",
+              "summary_english": "Cellular respiration breaks down glucose in mitochondria to release energy as ATP. The equation: C6H12O6 + 6O2 → 6CO2 + 6H2O + Energy. Mitochondria are the powerhouses of cells.",
+              "summary_hindi": "कोशिकीय श्वसन माइटोकॉन्ड्रिया में ग्लूकोज को तोड़कर ATP के रूप में ऊर्जा मुक्त करता है। माइटोकॉन्ड्रिया कोशिका का पावरहाउस है।",
+              "summary_tamil": "செல்லுலார் சுவாசம் மைட்டோகாண்ட்ரியாவில் குளுக்கோஸை உடைத்து ATP ஆற்றலை வெளியிடுகிறது.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Aerobic Respiration", "ATP"]
+            },
+            {
+              "text_block_id": "TB_chapter_1_006",
+              "original_text": "Sometimes there is a lack of oxygen in our muscle cells during heavy exercise. In such situations, another pathway for energy production is taken, which does not use oxygen. This is called anaerobic respiration. In yeast, anaerobic respiration produces ethanol and carbon dioxide. In our muscles, it produces lactic acid, which causes cramps.",
+              "summary_english": "When oxygen is insufficient during heavy exercise, anaerobic respiration occurs. In yeast it produces ethanol and CO2. In muscles it produces lactic acid, causing cramps.",
+              "summary_hindi": "भारी व्यायाम के दौरान जब ऑक्सीजन कम होती है, अवायवीय श्वसन होता है। यीस्ट में एथेनॉल बनता है। मांसपेशियों में लैक्टिक एसिड बनता है जो ऐंठन का कारण बनता है।",
+              "summary_tamil": "கடுமையான உடற்பயிற்சியின் போது ஆக்சிஜன் குறையும்போது காற்றில்லா சுவாசம் நடைபெறுகிறது. தசைகளில் லாக்டிக் அமிலம் உருவாகி பிடிப்பை ஏற்படுத்துகிறது.",
+              "ncert_refs": ["#/texts/0"],
+              "concepts": ["Anaerobic Respiration"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "chapter_id": "chapter_5",
+      "title": "The Solar System",
+      "summary_english": "This chapter explores our solar system, including the Sun, planets, moons, asteroids, and comets. Students learn about planetary motion, the difference between inner and outer planets, and Earth's unique position in the habitable zone.",
+      "summary_hindi": "यह अध्याय हमारे सौर मंडल का अध्ययन करता है, जिसमें सूर्य, ग्रह, चंद्रमा, क्षुद्रग्रह और धूमकेतु शामिल हैं।",
+      "summary_tamil": "இந்த அத்தியாயம் சூரியன், கோள்கள், நிலவுகள், சிறுகோள்கள் மற்றும் வால்நட்சத்திரங்கள் உள்ளிட்ட நமது சூரிய மண்டலத்தை ஆராய்கிறது.",
+      "faqs": [
+        {"question": "Why is Earth called the 'Goldilocks planet'?", "answer": "Earth is in the habitable zone where it's not too hot and not too cold for liquid water to exist. This 'just right' condition, like in the Goldilocks fairy tale, allows life to thrive."},
+        {"question": "What is the difference between inner and outer planets?", "answer": "Inner planets (Mercury, Venus, Earth, Mars) are rocky, smaller, and closer to the Sun. Outer planets (Jupiter, Saturn, Uranus, Neptune) are gas giants, much larger, and farther from the Sun. The asteroid belt separates them."},
+        {"question": "Why do planets orbit the Sun?", "answer": "Planets orbit the Sun because of gravity. The Sun's massive gravitational pull keeps planets in their elliptical orbits. Without gravity, planets would fly off in straight lines into space."},
+        {"question": "What causes seasons on Earth?", "answer": "Seasons are caused by Earth's tilted axis (23.5 degrees). As Earth orbits the Sun, different hemispheres receive more or less direct sunlight, creating summer and winter."}
+      ],
+      "followups": [
+        "How big is the Sun compared to Earth?",
+        "What would happen if Earth was closer to the Sun?",
+        "Why does Mars look red?",
+        "Could humans live on any other planet?"
+      ],
+      "ncert_refs": ["#/texts/1"],
+      "sections": [
+        {
+          "section_id": "section_chapter_5_1",
+          "title": "The Sun and Inner Planets",
+          "summary_english": "The Sun is a medium-sized star at the center of our solar system. The four inner planets - Mercury, Venus, Earth, and Mars - are rocky terrestrial planets. Each has unique characteristics that make it different from the others.",
+          "concepts": ["Solar System", "Inner Planets", "Gravity", "Habitable Zone"],
+          "text_blocks": [
+            {
+              "text_block_id": "TB_chapter_5_001",
+              "original_text": "The Sun is at the centre of the solar system. It is a huge ball of hot gases, mainly hydrogen and helium. The temperature at the surface of the Sun is about 6000 degrees Celsius. The Sun provides light and heat energy that makes life possible on Earth. Eight planets revolve around the Sun in fixed elliptical orbits. The force that keeps them in orbit is the gravitational pull of the Sun.",
+              "summary_english": "The Sun is a massive ball of hydrogen and helium at 6000°C surface temperature. Eight planets orbit it in elliptical paths held by the Sun's gravitational pull.",
+              "summary_hindi": "सूर्य हाइड्रोजन और हीलियम की एक विशाल गेंद है जिसकी सतह का तापमान 6000°C है। आठ ग्रह सूर्य के गुरुत्वाकर्षण बल से बंधे अण्डाकार कक्षाओं में परिक्रमा करते हैं।",
+              "summary_tamil": "சூரியன் ஹைட்ரஜன் மற்றும் ஹீலியம் கொண்ட பெரிய வாயு பந்து. எட்டு கோள்கள் சூரியனின் ஈர்ப்பு விசையால் நீள்வட்ட பாதையில் சுற்றுகின்றன.",
+              "ncert_refs": ["#/texts/1"],
+              "concepts": ["Solar System", "Gravity"]
+            },
+            {
+              "text_block_id": "TB_chapter_5_002",
+              "original_text": "Mercury is the smallest planet and closest to the Sun. It has no atmosphere and extreme temperature variations. Venus is the hottest planet due to its thick atmosphere of carbon dioxide that traps heat (greenhouse effect). Earth is the only planet known to support life, with liquid water and a protective atmosphere. Mars is called the Red Planet because of iron oxide on its surface.",
+              "summary_english": "Mercury is smallest with no atmosphere. Venus is hottest due to greenhouse effect. Earth uniquely supports life with liquid water. Mars is red from iron oxide on its surface.",
+              "summary_hindi": "बुध सबसे छोटा ग्रह है जिसका कोई वायुमंडल नहीं है। शुक्र ग्रीनहाउस प्रभाव के कारण सबसे गर्म है। पृथ्वी पर ही जीवन है। मंगल लोहे के ऑक्साइड से लाल दिखता है।",
+              "summary_tamil": "புதன் மிகச்சிறியது, வளிமண்டலம் இல்லை. வெள்ளி பசுமைக்குடில் விளைவால் மிகவும் சூடானது. பூமி மட்டுமே உயிரை ஆதரிக்கிறது. செவ்வாய் இரும்பு ஆக்சைடால் சிவப்பு.",
+              "ncert_refs": ["#/texts/1"],
+              "concepts": ["Inner Planets", "Habitable Zone"]
+            }
+          ]
+        },
+        {
+          "section_id": "section_chapter_5_2",
+          "title": "Outer Planets and Other Bodies",
+          "summary_english": "The outer planets are gas and ice giants beyond the asteroid belt. Jupiter is the largest planet, Saturn has iconic rings, Uranus rotates on its side, and Neptune is the windiest. The solar system also contains asteroids, comets, and dwarf planets.",
+          "concepts": ["Outer Planets", "Asteroids", "Comets"],
+          "text_blocks": [
+            {
+              "text_block_id": "TB_chapter_5_003",
+              "original_text": "Beyond the asteroid belt lie the four outer planets, also called gas giants. Jupiter is the largest planet in our solar system - more than 1300 Earths could fit inside it. It has a Great Red Spot which is a giant storm. Saturn is famous for its beautiful rings made of ice and rock particles. Uranus is unique because it rotates on its side. Neptune, the farthest planet, has the strongest winds in the solar system.",
+              "summary_english": "Jupiter is the largest planet (1300 Earths could fit inside) with the Great Red Spot storm. Saturn has ice-rock rings. Uranus rotates sideways. Neptune has the strongest winds.",
+              "summary_hindi": "बृहस्पति सबसे बड़ा ग्रह है (1300 पृथ्वियाँ समा सकती हैं) जिसमें महान लाल धब्बा तूफान है। शनि के बर्फ-चट्टान के छल्ले हैं। अरुण बगल में घूमता है। वरुण में सबसे तेज हवाएँ हैं।",
+              "summary_tamil": "வியாழன் மிகப்பெரிய கோள் (1300 பூமிகள் பொருந்தும்). சனி பனி-பாறை வளையங்கள் கொண்டது. யுரேனஸ் பக்கவாட்டில் சுழல்கிறது. நெப்டியூன் மிகவேகமான காற்றைக் கொண்டது.",
+              "ncert_refs": ["#/texts/1"],
+              "concepts": ["Outer Planets"]
+            },
+            {
+              "text_block_id": "TB_chapter_5_004",
+              "original_text": "Asteroids are rocky bodies that orbit the Sun, mostly found in the asteroid belt between Mars and Jupiter. Comets are icy bodies that develop a glowing tail when they come close to the Sun. The tail always points away from the Sun due to solar wind. Pluto was reclassified as a dwarf planet in 2006 because it hasn't cleared its orbital neighbourhood.",
+              "summary_english": "Asteroids are rocky bodies mostly in the belt between Mars and Jupiter. Comets are icy bodies that develop tails pointing away from the Sun. Pluto is a dwarf planet since 2006.",
+              "summary_hindi": "क्षुद्रग्रह चट्टानी पिंड हैं जो मंगल और बृहस्पति के बीच पट्टी में हैं। धूमकेतु बर्फीले पिंड हैं जिनकी पूँछ सूर्य से दूर इशारा करती है। प्लूटो 2006 से बौना ग्रह है।",
+              "summary_tamil": "சிறுகோள்கள் செவ்வாய் மற்றும் வியாழனுக்கு இடையே உள்ள பாறை உடல்கள். வால்நட்சத்திரங்கள் சூரியனுக்கு அருகில் வரும்போது வால் உருவாகும். புளூட்டோ 2006 முதல் குள்ள கோள்.",
+              "ncert_refs": ["#/texts/1"],
+              "concepts": ["Asteroids", "Comets"]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "concept_registry": {
+    "Photosynthesis": {
+      "concept_id": "Photosynthesis",
+      "concept_name": "Photosynthesis",
+      "parents": ["Plant Biology", "Chemical Processes"],
+      "children": ["Light-dependent Reactions", "Calvin Cycle", "Photolysis"],
+      "siblings": ["Aerobic Respiration", "Transpiration"],
+      "occurrences": 8,
+      "levels": ["document", "section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_1"],
+      "text_block_ids": ["TB_chapter_1_001", "TB_chapter_1_002", "TB_chapter_1_003"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Chlorophyll", "relationship": "requires", "confidence": 0.95},
+        {"target_concept": "Stomata", "relationship": "uses", "confidence": 0.85},
+        {"target_concept": "Aerobic Respiration", "relationship": "inverse_of", "confidence": 0.9},
+        {"target_concept": "Autotrophic Nutrition", "relationship": "part_of", "confidence": 0.8}
+      ]
+    },
+    "Chlorophyll": {
+      "concept_id": "Chlorophyll",
+      "concept_name": "Chlorophyll",
+      "parents": ["Plant Pigments"],
+      "children": [],
+      "siblings": ["Carotenoids"],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_1"],
+      "text_block_ids": ["TB_chapter_1_001"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Photosynthesis", "relationship": "enables", "confidence": 0.95}
+      ]
+    },
+    "Stomata": {
+      "concept_id": "Stomata",
+      "concept_name": "Stomata",
+      "parents": ["Leaf Structure"],
+      "children": ["Guard Cells"],
+      "siblings": [],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_1"],
+      "text_block_ids": ["TB_chapter_1_002"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Photosynthesis", "relationship": "supports", "confidence": 0.85},
+        {"target_concept": "Transpiration", "relationship": "enables", "confidence": 0.7}
+      ]
+    },
+    "Autotrophic Nutrition": {
+      "concept_id": "Autotrophic Nutrition",
+      "concept_name": "Autotrophic Nutrition",
+      "parents": ["Nutrition"],
+      "children": ["Photosynthesis", "Chemosynthesis"],
+      "siblings": ["Heterotrophic Nutrition"],
+      "occurrences": 2,
+      "levels": ["section"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_1"],
+      "text_block_ids": [],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Heterotrophic Nutrition", "relationship": "opposite_of", "confidence": 0.95}
+      ]
+    },
+    "Heterotrophic Nutrition": {
+      "concept_id": "Heterotrophic Nutrition",
+      "concept_name": "Heterotrophic Nutrition",
+      "parents": ["Nutrition"],
+      "children": ["Digestion"],
+      "siblings": ["Autotrophic Nutrition"],
+      "occurrences": 2,
+      "levels": ["section"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_2"],
+      "text_block_ids": [],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Autotrophic Nutrition", "relationship": "opposite_of", "confidence": 0.95},
+        {"target_concept": "Digestion", "relationship": "includes", "confidence": 0.9}
+      ]
+    },
+    "Digestion": {
+      "concept_id": "Digestion",
+      "concept_name": "Digestion",
+      "parents": ["Heterotrophic Nutrition"],
+      "children": ["Mechanical Digestion", "Chemical Digestion"],
+      "siblings": ["Absorption", "Assimilation"],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_2"],
+      "text_block_ids": ["TB_chapter_1_004"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Enzymes", "relationship": "uses", "confidence": 0.9}
+      ]
+    },
+    "Enzymes": {
+      "concept_id": "Enzymes",
+      "concept_name": "Enzymes",
+      "parents": ["Biological Catalysts"],
+      "children": ["Salivary Amylase", "Pepsin", "Lipase"],
+      "siblings": [],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_2"],
+      "text_block_ids": ["TB_chapter_1_004"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Digestion", "relationship": "enables", "confidence": 0.9}
+      ]
+    },
+    "Aerobic Respiration": {
+      "concept_id": "Aerobic Respiration",
+      "concept_name": "Aerobic Respiration",
+      "parents": ["Cellular Respiration"],
+      "children": ["Glycolysis", "Krebs Cycle", "Electron Transport Chain"],
+      "siblings": ["Anaerobic Respiration"],
+      "occurrences": 4,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_3"],
+      "text_block_ids": ["TB_chapter_1_005"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "ATP", "relationship": "produces", "confidence": 0.95},
+        {"target_concept": "Photosynthesis", "relationship": "inverse_of", "confidence": 0.9},
+        {"target_concept": "Anaerobic Respiration", "relationship": "alternative_to", "confidence": 0.85}
+      ]
+    },
+    "Anaerobic Respiration": {
+      "concept_id": "Anaerobic Respiration",
+      "concept_name": "Anaerobic Respiration",
+      "parents": ["Cellular Respiration"],
+      "children": ["Fermentation"],
+      "siblings": ["Aerobic Respiration"],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_3"],
+      "text_block_ids": ["TB_chapter_1_006"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Aerobic Respiration", "relationship": "alternative_to", "confidence": 0.85}
+      ]
+    },
+    "ATP": {
+      "concept_id": "ATP",
+      "concept_name": "ATP (Adenosine Triphosphate)",
+      "parents": ["Energy Currency"],
+      "children": [],
+      "siblings": ["ADP"],
+      "occurrences": 2,
+      "levels": ["text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_3"],
+      "text_block_ids": ["TB_chapter_1_005"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Aerobic Respiration", "relationship": "produced_by", "confidence": 0.95}
+      ]
+    },
+    "Photolysis": {
+      "concept_id": "Photolysis",
+      "concept_name": "Photolysis",
+      "parents": ["Photosynthesis"],
+      "children": [],
+      "siblings": [],
+      "occurrences": 1,
+      "levels": ["text_block"],
+      "chapter_ids": ["chapter_1"],
+      "section_ids": ["section_chapter_1_1"],
+      "text_block_ids": ["TB_chapter_1_003"],
+      "ncert_refs": ["#/texts/0"],
+      "related_concepts": [
+        {"target_concept": "Photosynthesis", "relationship": "part_of", "confidence": 0.95}
+      ]
+    },
+    "Solar System": {
+      "concept_id": "Solar System",
+      "concept_name": "Solar System",
+      "parents": ["Astronomy"],
+      "children": ["Inner Planets", "Outer Planets", "Asteroids", "Comets"],
+      "siblings": [],
+      "occurrences": 5,
+      "levels": ["document", "section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_1"],
+      "text_block_ids": ["TB_chapter_5_001"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Gravity", "relationship": "governed_by", "confidence": 0.95}
+      ]
+    },
+    "Gravity": {
+      "concept_id": "Gravity",
+      "concept_name": "Gravity",
+      "parents": ["Forces"],
+      "children": ["Gravitational Pull", "Orbital Motion"],
+      "siblings": ["Friction", "Magnetism"],
+      "occurrences": 4,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_1"],
+      "text_block_ids": ["TB_chapter_5_001"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Solar System", "relationship": "governs", "confidence": 0.95},
+        {"target_concept": "Inner Planets", "relationship": "affects", "confidence": 0.8}
+      ]
+    },
+    "Inner Planets": {
+      "concept_id": "Inner Planets",
+      "concept_name": "Inner Planets (Terrestrial Planets)",
+      "parents": ["Solar System"],
+      "children": ["Mercury", "Venus", "Earth", "Mars"],
+      "siblings": ["Outer Planets"],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_1"],
+      "text_block_ids": ["TB_chapter_5_002"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Habitable Zone", "relationship": "contains", "confidence": 0.7},
+        {"target_concept": "Outer Planets", "relationship": "contrasts_with", "confidence": 0.9}
+      ]
+    },
+    "Habitable Zone": {
+      "concept_id": "Habitable Zone",
+      "concept_name": "Habitable Zone (Goldilocks Zone)",
+      "parents": ["Planetary Science"],
+      "children": [],
+      "siblings": [],
+      "occurrences": 2,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_1"],
+      "text_block_ids": ["TB_chapter_5_002"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Inner Planets", "relationship": "within", "confidence": 0.7}
+      ]
+    },
+    "Outer Planets": {
+      "concept_id": "Outer Planets",
+      "concept_name": "Outer Planets (Gas Giants)",
+      "parents": ["Solar System"],
+      "children": ["Jupiter", "Saturn", "Uranus", "Neptune"],
+      "siblings": ["Inner Planets"],
+      "occurrences": 3,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_2"],
+      "text_block_ids": ["TB_chapter_5_003"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Inner Planets", "relationship": "contrasts_with", "confidence": 0.9}
+      ]
+    },
+    "Asteroids": {
+      "concept_id": "Asteroids",
+      "concept_name": "Asteroids",
+      "parents": ["Solar System"],
+      "children": [],
+      "siblings": ["Comets"],
+      "occurrences": 2,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_2"],
+      "text_block_ids": ["TB_chapter_5_004"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Comets", "relationship": "similar_to", "confidence": 0.6}
+      ]
+    },
+    "Comets": {
+      "concept_id": "Comets",
+      "concept_name": "Comets",
+      "parents": ["Solar System"],
+      "children": [],
+      "siblings": ["Asteroids"],
+      "occurrences": 2,
+      "levels": ["section", "text_block"],
+      "chapter_ids": ["chapter_5"],
+      "section_ids": ["section_chapter_5_2"],
+      "text_block_ids": ["TB_chapter_5_004"],
+      "ncert_refs": ["#/texts/1"],
+      "related_concepts": [
+        {"target_concept": "Asteroids", "relationship": "similar_to", "confidence": 0.6}
+      ]
+    }
+  },
+  "metadata": {
+    "total_concepts": 18,
+    "total_text_blocks": 10,
+    "total_relationships": 28,
+    "format_version": "v10.2.4",
+    "output_format": "v10.1_composite",
+    "structure": "relational_textbook_hierarchy",
+    "source": "NCERT Science Grade 10 (Sample)",
+    "languages": ["english", "hindi", "tamil"]
+  }
+}

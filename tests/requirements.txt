@@ -1,5 +1,6 @@
+pytest>=7.0.0
 # Match pipecat-ai version from the main server
-pipecat-ai[websocket]==0.0.98
+pipecat-ai[websocket,silero]==0.0.98
 websockets==14.0
 numpy==1.26.4
 aiohttp>=3.9.0
@@ -8,3 +9,6 @@ starlette>=0.37.0
 aiosqlite>=0.20.0
 openai>=1.0.0
 fastapi>=0.110.0
+# Dependencies pulled in by bot.py / classroom.py import chain
+elevenlabs>=1.0.0
+httpx>=0.25.0
