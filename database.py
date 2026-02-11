@@ -189,6 +189,19 @@ class RoomMemberRecord:
     joined_at: float = 0.0
     last_active: float = 0.0
 
+@dataclass
+class TeacherRoleRequestRecord:
+    id: str
+    user_id: str
+    user_name: str
+    user_email: str
+    purpose: Optional[str] = None
+    status: str = "pending"  # "pending" | "approved" | "rejected"
+    created_at: float = 0.0
+    reviewed_at: Optional[float] = None
+    reviewed_by: Optional[str] = None
+    review_note: Optional[str] = None
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -263,6 +276,19 @@ CREATE TABLE IF NOT EXISTS recordings (
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS teacher_role_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL DEFAULT '',
+    user_email TEXT NOT NULL DEFAULT '',
+    purpose TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL,
+    reviewed_at REAL,
+    reviewed_by TEXT,
+    review_note TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
@@ -315,6 +341,9 @@ CREATE TABLE IF NOT EXISTS room_members (
 CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);
 CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);
+CREATE INDEX IF NOT EXISTS idx_teacher_requests_user ON teacher_role_requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_teacher_requests_status ON teacher_role_requests(status);
+CREATE INDEX IF NOT EXISTS idx_teacher_requests_created_at ON teacher_role_requests(created_at);
 """
 
 
@@ -948,6 +977,146 @@ class ClassroomDB:
         stats["recent_sessions"] = [s.to_dict() for s in recent]
 
         return stats
+
+    # ── Teacher Role Requests ────────────────────────────────────
+
+    async def create_teacher_role_request(
+        self,
+        user_id: str,
+        user_name: str,
+        user_email: str,
+        purpose: str = "",
+    ) -> TeacherRoleRequestRecord:
+        """Create (or refresh) a pending teacher-role request for a user."""
+        now = time.time()
+
+        # If user already has a pending request, return it unchanged.
+        existing_pending = await self.get_latest_teacher_role_request(user_id=user_id, status="pending")
+        if existing_pending:
+            return existing_pending
+
+        # Reuse/update a previous rejected request if present; else insert new.
+        latest = await self.get_latest_teacher_role_request(user_id=user_id)
+        if latest and latest.status == "rejected":
+            await self._db.execute(
+                """UPDATE teacher_role_requests
+                   SET user_name = ?, user_email = ?, purpose = ?, status = 'pending',
+                       created_at = ?, reviewed_at = NULL, reviewed_by = NULL, review_note = NULL
+                   WHERE id = ?""",
+                (user_name, user_email, purpose or "", now, latest.id),
+            )
+            await self._db.commit()
+            return await self.get_teacher_role_request(latest.id)
+
+        req = TeacherRoleRequestRecord(
+            id=str(uuid.uuid4())[:12],
+            user_id=user_id,
+            user_name=user_name or user_id,
+            user_email=user_email or "",
+            purpose=purpose or "",
+            status="pending",
+            created_at=now,
+        )
+        await self._db.execute(
+            """INSERT INTO teacher_role_requests
+               (id, user_id, user_name, user_email, purpose, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                req.id,
+                req.user_id,
+                req.user_name,
+                req.user_email,
+                req.purpose,
+                req.status,
+                req.created_at,
+            ),
+        )
+        await self._db.commit()
+        return req
+
+    async def get_teacher_role_request(self, request_id: str) -> Optional[TeacherRoleRequestRecord]:
+        async with self._db.execute(
+            "SELECT * FROM teacher_role_requests WHERE id = ?",
+            (request_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return TeacherRoleRequestRecord(**dict(row)) if row else None
+
+    async def get_latest_teacher_role_request(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+    ) -> Optional[TeacherRoleRequestRecord]:
+        if status:
+            query = """SELECT * FROM teacher_role_requests
+                       WHERE user_id = ? AND status = ?
+                       ORDER BY created_at DESC
+                       LIMIT 1"""
+            params = (user_id, status)
+        else:
+            query = """SELECT * FROM teacher_role_requests
+                       WHERE user_id = ?
+                       ORDER BY created_at DESC
+                       LIMIT 1"""
+            params = (user_id,)
+
+        async with self._db.execute(query, params) as cursor:
+            row = await cursor.fetchone()
+            return TeacherRoleRequestRecord(**dict(row)) if row else None
+
+    async def list_teacher_role_requests(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[TeacherRoleRequestRecord]:
+        if status:
+            query = """SELECT * FROM teacher_role_requests
+                       WHERE status = ?
+                       ORDER BY created_at DESC
+                       LIMIT ? OFFSET ?"""
+            params = (status, limit, offset)
+        else:
+            query = """SELECT * FROM teacher_role_requests
+                       ORDER BY created_at DESC
+                       LIMIT ? OFFSET ?"""
+            params = (limit, offset)
+
+        async with self._db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [TeacherRoleRequestRecord(**dict(row)) for row in rows]
+
+    async def review_teacher_role_request(
+        self,
+        request_id: str,
+        approved: bool,
+        reviewed_by: str,
+        note: str = "",
+    ) -> Optional[TeacherRoleRequestRecord]:
+        req = await self.get_teacher_role_request(request_id)
+        if not req:
+            return None
+
+        status = "approved" if approved else "rejected"
+        await self._db.execute(
+            """UPDATE teacher_role_requests
+               SET status = ?, reviewed_at = ?, reviewed_by = ?, review_note = ?
+               WHERE id = ?""",
+            (status, time.time(), reviewed_by, note or "", request_id),
+        )
+        await self._db.commit()
+        return await self.get_teacher_role_request(request_id)
+
+    async def is_teacher(self, user_id: str) -> bool:
+        async with self._db.execute(
+            """SELECT 1
+               FROM teacher_role_requests
+               WHERE user_id = ? AND status = 'approved'
+               ORDER BY created_at DESC
+               LIMIT 1""",
+            (user_id,),
+        ) as cursor:
+            return (await cursor.fetchone()) is not None
 
 
 # ─────────────────────────────────────────────────────────────────────
