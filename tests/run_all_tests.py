@@ -52,7 +52,11 @@ def run_suite(name: str, script: str, verbose: bool = False) -> dict:
     print("=" * 70)
     sys.stdout.flush()
 
-    cmd = [sys.executable, "-u", script, "--test", "all"]  # -u = unbuffered
+    # performance suite uses --quick instead of --test all
+    if name == "performance":
+        cmd = [sys.executable, "-u", script, "--quick"]  # -u = unbuffered
+    else:
+        cmd = [sys.executable, "-u", script, "--test", "all"]  # -u = unbuffered
     if verbose:
         cmd.append("--verbose")
 

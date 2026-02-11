@@ -521,6 +521,17 @@ class RoomManager:
         if not sentence.strip():
             return []
 
+        # Per-sentence language detection: the LLM may drift mid-response,
+        # so re-detect the actual language of THIS sentence rather than
+        # trusting the source_lang set at the start of the response.
+        detected_lang = self._detect_text_language(sentence)
+        if detected_lang != source_lang:
+            logger.info(
+                f"[CLASSROOM] Per-sentence drift: expected={source_lang}, "
+                f"detected={detected_lang}, sentence='{sentence[:60]}'"
+            )
+            source_lang = detected_lang
+
         tasks = []
         # Snapshot users to avoid "dictionary changed size during iteration"
         listeners = [u for u in list(room.users.values()) if u.user_id != room.speaker_id]
@@ -1377,14 +1388,15 @@ class RoomManager:
             try:
                 profile = await classroom_db.get_user_profile(user.user_id)
                 if profile:
-                    # Use DB name/language if the user didn't override them
+                    # Use DB name only if the user didn't provide a custom name
                     if user.name == f"User-{user.user_id[:4]}":
                         user.name = profile.display_name
-                    if user.language == "en" and profile.preferred_language != "en":
-                        user.language = profile.preferred_language
+                    # NOTE: We intentionally do NOT override user.language from DB.
+                    # The user explicitly selects their language in the lobby UI,
+                    # and overriding it caused Bug #3 where English users saw Hindi text.
                     logger.info(
                         f"[CLASSROOM] Loaded profile for {user.name} ({user.user_id}) "
-                        f"from DB [lang={user.language}]"
+                        f"from DB [lang={user.language}, db_lang={profile.preferred_language}]"
                     )
             except Exception as e:
                 logger.debug(f"[CLASSROOM] Could not load user profile: {e}")
@@ -1656,11 +1668,11 @@ class RoomManager:
         text: str,
         language: str,
     ):
-        """Broadcast a speaker's transcription to all listeners, translated."""
-        if not self._translator:
-            logger.warning("No translator available for classroom broadcast")
-            return
+        """Broadcast a speaker's transcription to all listeners, translated.
 
+        Even without a translator, sends the original text so listeners always
+        see the question (untranslated is better than invisible).
+        """
         speaker = room.users.get(speaker_id)
         if not speaker:
             return
@@ -1715,10 +1727,10 @@ class RoomManager:
         The `language` param is the *expected* language (speaker's registered lang),
         but the LLM may have drifted. We detect the actual output language to ensure
         correct translation for listeners.
-        """
-        if not self._translator:
-            return
 
+        Even without a translator, sends the original text so listeners always
+        see the response (untranslated is better than invisible).
+        """
         # Detect actual output language — the LLM may have drifted
         actual_lang = self._detect_text_language(text)
         if actual_lang != language:
@@ -1799,13 +1811,14 @@ class RoomManager:
         and synthesize + stream TTS audio to a listener.
 
         Flow:
-          1. Translate original_text to listener's language
-          2. Prepend speaker attribution ("Ravi asks:" / "Mira says:")
-          3. Send JSON event with text
-          4. Send bot_audio_start JSON
-          5. Synthesize speech via run_tts() (provider-agnostic)
-          6. Stream audio chunks as binary WebSocket frames
-          7. Send bot_audio_end JSON
+          1. Detect actual language of text (guards against LLM drift)
+          2. Translate original_text to listener's language
+          3. Prepend speaker attribution ("Ravi asks:" / "Mira says:")
+          4. Send JSON event with text
+          5. Send bot_audio_start JSON
+          6. Synthesize speech via run_tts() (provider-agnostic)
+          7. Stream audio chunks as binary WebSocket frames
+          8. Send bot_audio_end JSON
         """
         t0 = time.time()
         translate_ms = 0.0
@@ -1813,6 +1826,20 @@ class RoomManager:
         audio_bytes_sent = 0
 
         try:
+            # ── Step 0: Per-text language detection ──
+            # The caller's source_lang may be stale if the LLM drifted mid-response.
+            # For bot_response events, re-detect to ensure correct translation direction.
+            # For transcription events, trust the STT-reported language (user speech).
+            if event_type == "bot_response":
+                detected_lang = self._detect_text_language(original_text)
+                if detected_lang != source_lang:
+                    logger.info(
+                        f"[CLASSROOM] _send_translated_event drift: "
+                        f"expected={source_lang}, detected={detected_lang}, "
+                        f"user={user.name}, text='{original_text[:60]}'"
+                    )
+                    source_lang = detected_lang
+
             # ── Step 1: Translate ──
             if user.language != source_lang and self._translator:
                 translate_t0 = time.time()
