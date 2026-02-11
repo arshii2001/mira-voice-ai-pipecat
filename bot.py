@@ -492,35 +492,51 @@ class UserTranscriptForwarder(FrameProcessor):
     Sends STT transcription results back to the client as JSON messages
     so the frontend can display what the user said.
 
+    Strips internal metadata tags ([User is speaking X], Speaker N:) that are
+    meant for the LLM pipeline, not for display.
+
     JSON messages sent:
       - {"type": "user_transcript", "text": "...", "final": true}   — final transcript
       - {"type": "user_transcript", "text": "...", "final": false}  — interim transcript
     """
 
+    # Regex to strip internal pipeline metadata from display text
+    _LANG_TAG_RE = re.compile(r"\[User is speaking \w+\]\s*")
+    _SPEAKER_RE = re.compile(r"Speaker\s+\d+:\s*")
+
     def __init__(self, websocket, name: str = "UserTranscriptForwarder", **kwargs):
         super().__init__(name=name, **kwargs)
         self._websocket = websocket
+
+    @classmethod
+    def _clean_for_display(cls, text: str) -> str:
+        """Strip [User is speaking X] and Speaker N: prefixes for client display."""
+        cleaned = cls._LANG_TAG_RE.sub("", text)
+        cleaned = cls._SPEAKER_RE.sub("", cleaned)
+        return cleaned.strip()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TranscriptionFrame):
             try:
+                display_text = self._clean_for_display(frame.text)
                 await self._websocket.send_json({
                     "type": "user_transcript",
-                    "text": frame.text,
+                    "text": display_text,
                     "final": True,
                 })
-                logger.info(f"[USER_TEXT] Sent final transcript: '{frame.text[:80]}'")
+                logger.info(f"[USER_TEXT] Sent final transcript: '{display_text[:80]}'")
             except Exception as e:
                 logger.warning(f"[USER_TEXT] Failed to send transcript: {e}")
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, InterimTranscriptionFrame):
             try:
+                display_text = self._clean_for_display(frame.text)
                 await self._websocket.send_json({
                     "type": "user_transcript",
-                    "text": frame.text,
+                    "text": display_text,
                     "final": False,
                 })
             except Exception as e:

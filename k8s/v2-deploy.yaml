@@ -41,7 +41,7 @@ data:
   PIPECAT_ENABLED: "true"
   PIPECAT_API_URL: "https://pipecat-v2-api.taile994c5.ts.net"
   PIPECAT_CONNECTION_MODE: "websocket"
-  WEBUI_AUTH: "false"
+  WEBUI_AUTH: "true"
   ENABLE_SIGNUP: "true"
   ENABLE_PERSISTENT_CONFIG: "false"
 
