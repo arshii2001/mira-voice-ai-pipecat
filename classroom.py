@@ -1294,13 +1294,29 @@ class RoomManager:
 
     async def create_room(self, name: str = "Classroom", teacher_id: Optional[str] = None,
                           teacher_name: Optional[str] = None, topic: Optional[str] = None,
-                          is_permanent: bool = False, room_type: str = "teacher_driven") -> Room:
+                          is_permanent: bool = False, room_type: str = "teacher_driven",
+                          curriculum_chapter_id: Optional[str] = None,
+                          curriculum_section_id: Optional[str] = None) -> Room:
         """Create a new room and persist it to DB. The creator becomes the teacher."""
         room_id = str(uuid.uuid4())[:8]
         if room_type not in ("teacher_driven", "discussion"):
             room_type = "teacher_driven"
+
+        # Auto-set topic from curriculum section if not explicitly provided
+        if curriculum_section_id and not topic:
+            try:
+                from curriculum_manager import get_curriculum_manager
+                cm = get_curriculum_manager()
+                info = cm.get_section_info(curriculum_section_id)
+                if info:
+                    topic = f"{info['chapter_title']}: {info['section_title']}" if info.get('chapter_title') else info.get('section_title', '')
+            except Exception:
+                pass
+
         room = Room(room_id=room_id, name=name, teacher_id=teacher_id,
-                     current_lesson_topic=topic, topic=topic, room_type=room_type)
+                     current_lesson_topic=topic, topic=topic, room_type=room_type,
+                     curriculum_chapter_id=curriculum_chapter_id,
+                     curriculum_section_id=curriculum_section_id)
         self._rooms[room_id] = room
         if is_permanent:
             self._permanent_rooms.add(room_id)
@@ -2061,11 +2077,15 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 @router.post("/rooms")
 async def create_room(name: str = "Classroom", teacher_id: str = None,
                       teacher_name: str = None, topic: str = None,
-                      is_permanent: bool = False, room_type: str = "teacher_driven"):
+                      is_permanent: bool = False, room_type: str = "teacher_driven",
+                      curriculum_chapter_id: str = None,
+                      curriculum_section_id: str = None):
     """Create a new classroom room. The creator becomes the teacher."""
     room = await room_manager.create_room(
         name=name, teacher_id=teacher_id, teacher_name=teacher_name,
         topic=topic, is_permanent=is_permanent, room_type=room_type,
+        curriculum_chapter_id=curriculum_chapter_id,
+        curriculum_section_id=curriculum_section_id,
     )
     return room.to_dict()
 
