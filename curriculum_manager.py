@@ -365,6 +365,105 @@ class CurriculumManager:
         """Return a specific text block by ID."""
         return self._text_blocks.get(block_id)
 
+    def get_section_context(
+        self,
+        section_id: str,
+        max_tokens: Optional[int] = None,
+        language: str = "english",
+    ) -> Optional[str]:
+        """Build curriculum context for a section (used by chapter:section dropdowns).
+
+        Returns a formatted string for the system prompt, or None if section not found.
+        Includes: section title, chapter title, concepts, text blocks, FAQs.
+        """
+        section = self._sections.get(section_id)
+        if not section:
+            return None
+
+        budget = max_tokens or CURRICULUM_CONTEXT_MAX_TOKENS
+        budget_chars = budget * CHARS_PER_TOKEN
+
+        chapter_id = self._section_chapter.get(section_id)
+        chapter = self._chapters.get(chapter_id) if chapter_id else None
+
+        lines: list[str] = []
+        used_chars = 0
+
+        # Header
+        sec_title = section.get("title", section_id)
+        lines.append(f"Section: {sec_title}")
+        if chapter:
+            lines.append(f"Chapter: {chapter.get('title', chapter_id)}")
+
+        # Concepts in this section
+        concepts = section.get("concepts", [])
+        if concepts:
+            lines.append(f"Concepts covered: {', '.join(concepts)}")
+
+        # Section summary
+        summary_key = f"summary_{language}" if language != "english" else "summary_english"
+        sec_summary = section.get(summary_key) or section.get("summary_english", "")
+        if sec_summary:
+            lines.append("")
+            lines.append(f"Overview: {sec_summary}")
+
+        used_chars = sum(len(l) for l in lines)
+
+        # Text blocks in this section
+        text_blocks = section.get("text_blocks", [])
+        if text_blocks and used_chars + 50 < budget_chars:
+            lines.append("")
+            lines.append("NCERT Reference Text:")
+            for block in text_blocks:
+                block_text = block.get(summary_key) or block.get("summary_english") or block.get("original_text", "")
+                if not block_text:
+                    continue
+                remaining = budget_chars - used_chars - 20
+                if remaining <= 50:
+                    break
+                if len(block_text) > remaining:
+                    block_text = block_text[:remaining].rsplit(" ", 1)[0] + "..."
+                lines.append(f'"{block_text}"')
+                used_chars += len(block_text) + 10
+
+        # FAQs from chapter (filtered to section concepts)
+        if chapter and used_chars + 50 < budget_chars:
+            faqs = chapter.get("faqs", [])
+            concept_keys = {c.lower() for c in concepts}
+            relevant_faqs = [
+                faq for faq in faqs
+                if any(ck in faq.get("question", "").lower() or ck in faq.get("answer", "").lower() for ck in concept_keys)
+            ]
+            if not relevant_faqs:
+                relevant_faqs = faqs[:2]
+            if relevant_faqs:
+                lines.append("")
+                lines.append("Key Questions:")
+                for faq in relevant_faqs[:3]:
+                    faq_text = f"Q: {faq['question']}\nA: {faq['answer']}"
+                    if used_chars + len(faq_text) + 10 < budget_chars:
+                        lines.append(faq_text)
+                        used_chars += len(faq_text) + 10
+                    else:
+                        break
+
+        return "\n".join(lines)
+
+    def get_section_info(self, section_id: str) -> Optional[dict]:
+        """Return section title, chapter title, and concepts for display."""
+        section = self._sections.get(section_id)
+        if not section:
+            return None
+        chapter_id = self._section_chapter.get(section_id)
+        chapter = self._chapters.get(chapter_id) if chapter_id else None
+        return {
+            "section_id": section_id,
+            "section_title": section.get("title", section_id),
+            "chapter_id": chapter_id,
+            "chapter_title": chapter.get("title", chapter_id) if chapter else None,
+            "concepts": section.get("concepts", []),
+        }
+
 
 # ── Singleton instance ────────────────────────────────────────────────
 _instance: Optional[CurriculumManager] = None

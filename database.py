@@ -150,6 +150,7 @@ class RoomRecord:
     created_by_name: Optional[str] = None  # teacher display name
     settings_json: str = "{}"
     is_permanent: bool = False
+    room_type: str = "teacher_driven"  # "teacher_driven" or "discussion"
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -282,6 +283,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     created_by_name TEXT,
     settings_json TEXT DEFAULT '{}',
     is_permanent INTEGER DEFAULT 0,
+    room_type TEXT DEFAULT 'teacher_driven',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -345,8 +347,28 @@ class ClassroomDB:
         await self._db.executescript(SCHEMA_SQL)
         await self._db.commit()
 
+        # ── Migrations for existing databases ──
+        await self._run_migrations()
+
         self._initialized = True
         logger.info(f"[DB] Classroom database initialized at {self._db_path}")
+
+    async def _run_migrations(self):
+        """Run safe ALTER TABLE migrations for columns added after initial schema."""
+        migrations = [
+            ("rooms", "room_type", "ALTER TABLE rooms ADD COLUMN room_type TEXT DEFAULT 'teacher_driven'"),
+        ]
+        for table, column, sql in migrations:
+            try:
+                # Check if column exists
+                async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+                    cols = [row[1] for row in await cursor.fetchall()]
+                if column not in cols:
+                    await self._db.execute(sql)
+                    await self._db.commit()
+                    logger.info(f"[DB] Migration: added {table}.{column}")
+            except Exception as e:
+                logger.warning(f"[DB] Migration skipped ({table}.{column}): {e}")
 
     async def close(self):
         """Close the database connection."""
@@ -668,35 +690,36 @@ class ClassroomDB:
 
     async def save_room(self, room_id: str, name: str, topic: str = None,
                         created_by: str = None, created_by_name: str = None,
-                        settings: dict = None, is_permanent: bool = False) -> RoomRecord:
+                        settings: dict = None, is_permanent: bool = False,
+                        room_type: str = "teacher_driven") -> RoomRecord:
         """Upsert a room configuration."""
         now = time.time()
         rec = RoomRecord(
             room_id=room_id, name=name, topic=topic,
             created_by=created_by, created_by_name=created_by_name,
             settings_json=json.dumps(settings or {}),
-            is_permanent=is_permanent,
+            is_permanent=is_permanent, room_type=room_type,
             created_at=now, updated_at=now,
         )
         await self._db.execute(
             """INSERT INTO rooms (room_id, name, topic, created_by, created_by_name,
-               settings_json, is_permanent, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               settings_json, is_permanent, room_type, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(room_id) DO UPDATE SET
                    name=excluded.name, topic=excluded.topic,
                    created_by=excluded.created_by, created_by_name=excluded.created_by_name,
                    settings_json=excluded.settings_json, is_permanent=excluded.is_permanent,
-                   updated_at=excluded.updated_at""",
+                   room_type=excluded.room_type, updated_at=excluded.updated_at""",
             (rec.room_id, rec.name, rec.topic, rec.created_by, rec.created_by_name,
-             rec.settings_json, int(rec.is_permanent), rec.created_at, rec.updated_at),
+             rec.settings_json, int(rec.is_permanent), rec.room_type, rec.created_at, rec.updated_at),
         )
         await self._db.commit()
-        logger.info(f"[DB] Room saved: {room_id} ({name})")
+        logger.info(f"[DB] Room saved: {room_id} ({name}) type={room_type}")
         return rec
 
     async def update_room(self, room_id: str, **kwargs):
         """Update specific room fields."""
-        allowed = {"name", "topic", "created_by", "created_by_name", "settings_json", "is_permanent"}
+        allowed = {"name", "topic", "created_by", "created_by_name", "settings_json", "is_permanent", "room_type"}
         updates = []
         params = []
         for k, v in kwargs.items():

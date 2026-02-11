@@ -343,6 +343,10 @@ class Room:
     teacher_id: Optional[str] = None  # Room creator = teacher
     current_lesson_topic: Optional[str] = None  # Current lesson topic set by teacher
     conversation_history: List[dict] = field(default_factory=list)  # [{role, content}] for LLM context
+    room_type: str = "teacher_driven"  # "teacher_driven" or "discussion"
+    # ── Curriculum topic context (chapter:section) ──
+    curriculum_chapter_id: Optional[str] = None
+    curriculum_section_id: Optional[str] = None
     # ── Reconnect support ──
     _disconnected_users: Dict[str, dict] = field(default_factory=dict)  # user_id -> {name, language, mode, is_speaker, disconnected_at}
     _speaker_grace_task: Optional[asyncio.Task] = None  # Pending speaker reassignment
@@ -375,6 +379,9 @@ class Room:
             "topic": self.topic,
             "teacher_id": self.teacher_id,
             "current_lesson_topic": self.current_lesson_topic,
+            "room_type": self.room_type,
+            "curriculum_chapter_id": self.curriculum_chapter_id,
+            "curriculum_section_id": self.curriculum_section_id,
         }
 
 
@@ -445,11 +452,16 @@ class RoomManager:
     def _get_co_teaching_prompt(self, room: Optional["Room"] = None) -> str:
         """Return the co-teaching system prompt for AI-assisted teaching mode.
 
-        Composes base + classroom prompt from versioned files.
+        Composes base + mode-specific prompt from versioned files.
+        Routes to 'discussion' prompt when room_type is 'discussion',
+        otherwise uses 'classroom' prompt. Language rules are inherited
+        from v4-base.md in both cases.
         Appends dynamic student context (topic, speaker name).
         Appends curriculum context if a topic matches loaded curriculum.
         """
-        prompt = load_system_prompt(version=PROMPT_VERSION, mode="classroom")
+        # Route prompt based on room type — teacher_driven uses 'classroom', discussion uses 'discussion'
+        mode = "discussion" if (room and room.room_type == "discussion") else "classroom"
+        prompt = load_system_prompt(version=PROMPT_VERSION, mode=mode)
 
         # Build dynamic context block
         context_lines = []
@@ -462,18 +474,33 @@ class RoomManager:
         if context_lines:
             prompt += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
 
-        # Append curriculum context if topic matches
-        if room and room.current_lesson_topic:
+        # Append curriculum context — prefer section-based lookup, fall back to concept-based
+        if room:
             from curriculum_manager import get_curriculum_manager
             cm = get_curriculum_manager()
             if cm.available:
-                curriculum_ctx = cm.get_context_for_topic(
-                    room.current_lesson_topic,
-                    language=room.users[room.speaker_id].language if room and room.speaker_id and room.speaker_id in room.users else "english",
+                speaker_lang = (
+                    room.users[room.speaker_id].language
+                    if room.speaker_id and room.speaker_id in room.users
+                    else "english"
                 )
+                curriculum_ctx = None
+
+                # 1. Section-based context (from chapter:section dropdowns)
+                if room.curriculum_section_id:
+                    curriculum_ctx = cm.get_section_context(
+                        room.curriculum_section_id, language=speaker_lang,
+                    )
+
+                # 2. Fall back to concept-based context (from topic string)
+                if not curriculum_ctx and room.current_lesson_topic:
+                    curriculum_ctx = cm.get_context_for_topic(
+                        room.current_lesson_topic, language=speaker_lang,
+                    )
+
                 if curriculum_ctx:
                     prompt += "\n\n--- CURRICULUM CONTEXT ---\n" + curriculum_ctx + "\n"
-                    logger.debug(f"[CURRICULUM] Injected {len(curriculum_ctx)} chars for topic: {room.current_lesson_topic}")
+                    logger.debug(f"[CURRICULUM] Injected {len(curriculum_ctx)} chars for room {room.room_id}")
 
         return prompt
 
@@ -603,6 +630,36 @@ class RoomManager:
                 "total_ms": total_ms,
             }
 
+    @staticmethod
+    def _detect_text_language(text: str) -> str:
+        """Detect the language of text by examining Unicode script.
+
+        Used to determine the actual language of LLM output (which may differ
+        from the speaker's registered language if the LLM drifts).
+        Returns 'hi', 'ta', 'kn', or 'en'.
+        """
+        # Strip ASCII/Latin chars, markdown, and whitespace
+        import re as _re
+        non_latin = _re.sub(r'[\x00-\x7F]', '', text)
+        if not non_latin:
+            return "en"
+
+        devanagari = sum(1 for c in non_latin if '\u0900' <= c <= '\u097F')
+        tamil = sum(1 for c in non_latin if '\u0B80' <= c <= '\u0BFF')
+        kannada = sum(1 for c in non_latin if '\u0C80' <= c <= '\u0CFF')
+
+        counts = {"hi": devanagari, "ta": tamil, "kn": kannada}
+        best = max(counts, key=counts.get)
+        if counts[best] > 0:
+            return best
+        return "en"
+
+    @staticmethod
+    def _make_language_tag(lang_code: str) -> str:
+        """Convert a language code to a [User is speaking X] tag for the LLM."""
+        label = {"en": "English", "hi": "Hindi", "ta": "Tamil", "kn": "Kannada"}.get(lang_code, "English")
+        return f"[User is speaking {label}]"
+
     async def ask_llm(
         self,
         question: str,
@@ -635,12 +692,26 @@ class RoomManager:
         full_response = ""
         sentence_buffer = ""  # Accumulates tokens until a sentence boundary
         pending_listener_tasks: list[asyncio.Task] = []
-        source_lang = "en"  # LLM responds in the language of the question; default en
+        source_lang = "en"  # Will be overridden to speaker's registered language
 
         # ── Timing anchors ──
         t_first_token: float = 0.0      # Time-to-first-token
         token_count: int = 0
         sentence_count: int = 0
+
+        # Detect speaker's registered language
+        if room and room.speaker_id and room.speaker_id in room.users:
+            source_lang = room.users[room.speaker_id].language
+
+        # ── CRITICAL: Ensure language tag is always present ──
+        # The voice pipeline (SonioxSTT) adds [User is speaking X] tags,
+        # but the text-message and teacher-action paths do NOT.
+        # Without a tag, conversation history in other languages causes drift.
+        # Always prepend a tag if the question doesn't already have one.
+        if not question.startswith("[User is speaking"):
+            lang_tag = self._make_language_tag(source_lang)
+            question = f"{lang_tag} {question}"
+            logger.info(f"[CLASSROOM] Prepended language tag: {lang_tag} to text question")
 
         # Build messages with conversation history for context
         messages = [{"role": "system", "content": system_prompt}]
@@ -648,10 +719,6 @@ class RoomManager:
             # Include last 20 messages for context
             messages.extend(room.conversation_history[-20:])
         messages.append({"role": "user", "content": question})
-
-        # Detect source language from the question (simple heuristic: check room speaker's lang)
-        if room and room.speaker_id and room.speaker_id in room.users:
-            source_lang = room.users[room.speaker_id].language
 
         try:
             stream = await self._llm_client.chat.completions.create(
@@ -680,6 +747,19 @@ class RoomManager:
                         )
                         # Record for aggregation
                         _metrics_collector.record_llm_ttft(ttft_ms)
+
+                    # After accumulating ~30 chars, detect the actual output language.
+                    # This catches LLM drift (e.g. responding in Hindi when asked in English).
+                    # We update source_lang so listener translation uses the correct source.
+                    if token_count == 10 or (token_count < 10 and len(full_response) >= 30):
+                        detected_output_lang = self._detect_text_language(full_response)
+                        if detected_output_lang != source_lang:
+                            logger.warning(
+                                f"[CLASSROOM] LLM language drift detected! "
+                                f"Expected={source_lang}, actual={detected_output_lang}, "
+                                f"text='{full_response[:50]}'"
+                            )
+                            source_lang = detected_output_lang
 
                     # Stream each token to the speaker immediately
                     try:
@@ -1203,11 +1283,13 @@ class RoomManager:
 
     async def create_room(self, name: str = "Classroom", teacher_id: Optional[str] = None,
                           teacher_name: Optional[str] = None, topic: Optional[str] = None,
-                          is_permanent: bool = False) -> Room:
+                          is_permanent: bool = False, room_type: str = "teacher_driven") -> Room:
         """Create a new room and persist it to DB. The creator becomes the teacher."""
         room_id = str(uuid.uuid4())[:8]
+        if room_type not in ("teacher_driven", "discussion"):
+            room_type = "teacher_driven"
         room = Room(room_id=room_id, name=name, teacher_id=teacher_id,
-                     current_lesson_topic=topic, topic=topic)
+                     current_lesson_topic=topic, topic=topic, room_type=room_type)
         self._rooms[room_id] = room
         if is_permanent:
             self._permanent_rooms.add(room_id)
@@ -1217,7 +1299,7 @@ class RoomManager:
             await classroom_db.save_room(
                 room_id=room_id, name=name, topic=topic,
                 created_by=teacher_id, created_by_name=teacher_name,
-                is_permanent=is_permanent,
+                is_permanent=is_permanent, room_type=room_type,
             )
         except Exception as e:
             logger.error(f"[CLASSROOM] Failed to persist room to DB: {e}")
@@ -1486,7 +1568,11 @@ class RoomManager:
     # ── Speaker token ──
 
     async def request_token(self, room_id: str, user_id: str) -> bool:
-        """Request the speaker token. Teacher gets priority (can reclaim anytime)."""
+        """Request the speaker token.
+
+        In teacher_driven rooms: teacher gets priority and can reclaim anytime.
+        In discussion rooms: first-come-first-served, any student can grab the token.
+        """
         room = self.get_room(room_id)
         if not room or user_id not in room.users:
             return False
@@ -1498,8 +1584,8 @@ class RoomManager:
         elif room.speaker_id == user_id:
             # Already the speaker
             return True
-        elif user_id == room.teacher_id:
-            # Teacher always gets priority — reclaim token immediately
+        elif user_id == room.teacher_id and room.room_type == "teacher_driven":
+            # Teacher always gets priority in teacher-driven rooms
             logger.info(f"[CLASSROOM] Teacher {user_id} reclaiming token in {room_id}")
             await self._assign_token(room, user_id)
             return True
@@ -1624,15 +1710,29 @@ class RoomManager:
         text: str,
         language: str,
     ):
-        """Broadcast Mira's response to all listeners, translated."""
+        """Broadcast Mira's response to all listeners, translated.
+
+        The `language` param is the *expected* language (speaker's registered lang),
+        but the LLM may have drifted. We detect the actual output language to ensure
+        correct translation for listeners.
+        """
         if not self._translator:
             return
+
+        # Detect actual output language — the LLM may have drifted
+        actual_lang = self._detect_text_language(text)
+        if actual_lang != language:
+            logger.warning(
+                f"[CLASSROOM] broadcast_bot_response: LLM drift detected! "
+                f"Expected={language}, actual={actual_lang}, text='{text[:50]}'"
+            )
+            language = actual_lang
 
         # Persist bot response to DB
         asyncio.create_task(
             self.save_message_to_db(
                 room=room, role="assistant", content=text,
-                speaker_name="Mira", original_language="en",
+                speaker_name="Mira", original_language=language,
             )
         )
 
@@ -1663,6 +1763,11 @@ class RoomManager:
             f"fanout_latency={fanout_ms}ms | lang={language} | "
             f"text='{text[:50]}'"
         )
+
+        # Discussion rooms: auto-release token after Mira responds
+        if room.room_type == "discussion" and room.speaker_id:
+            logger.info(f"[CLASSROOM] Discussion auto-release: releasing token from {room.speaker_id} in {room.room_id}")
+            await self.pass_token(room.room_id, room.speaker_id)
 
     async def broadcast_bot_audio(
         self,
@@ -1929,11 +2034,11 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 @router.post("/rooms")
 async def create_room(name: str = "Classroom", teacher_id: str = None,
                       teacher_name: str = None, topic: str = None,
-                      is_permanent: bool = False):
+                      is_permanent: bool = False, room_type: str = "teacher_driven"):
     """Create a new classroom room. The creator becomes the teacher."""
     room = await room_manager.create_room(
         name=name, teacher_id=teacher_id, teacher_name=teacher_name,
-        topic=topic, is_permanent=is_permanent,
+        topic=topic, is_permanent=is_permanent, room_type=room_type,
     )
     return room.to_dict()
 
@@ -2102,7 +2207,10 @@ async def create_user(user_id: str, display_name: str, preferred_language: str =
 
 @router.put("/rooms/{room_id}")
 async def update_room(room_id: str, name: str = None, topic: str = None,
-                      teacher_id: str = None, is_permanent: bool = None):
+                      teacher_id: str = None, is_permanent: bool = None,
+                      room_type: str = None,
+                      curriculum_chapter_id: str = None,
+                      curriculum_section_id: str = None):
     """Update room configuration."""
     room = room_manager.get_room(room_id)
     if not room:
@@ -2121,17 +2229,33 @@ async def update_room(room_id: str, name: str = None, topic: str = None,
             room_manager._permanent_rooms.add(room_id)
         else:
             room_manager._permanent_rooms.discard(room_id)
+    if room_type is not None and room_type in ("teacher_driven", "discussion"):
+        room.room_type = room_type
+    if curriculum_chapter_id is not None:
+        room.curriculum_chapter_id = curriculum_chapter_id
+    if curriculum_section_id is not None:
+        room.curriculum_section_id = curriculum_section_id
+        # Auto-set topic from section title for display
+        from curriculum_manager import get_curriculum_manager
+        cm = get_curriculum_manager()
+        info = cm.get_section_info(curriculum_section_id)
+        if info:
+            topic_label = f"{info['chapter_title']}: {info['section_title']}" if info['chapter_title'] else info['section_title']
+            room.topic = topic_label
+            room.current_lesson_topic = topic_label
 
     # Persist to DB
     kwargs = {}
     if name is not None:
         kwargs["name"] = name
-    if topic is not None:
-        kwargs["topic"] = topic
+    if topic is not None or curriculum_section_id is not None:
+        kwargs["topic"] = room.topic  # use the (possibly auto-set) topic
     if teacher_id is not None:
         kwargs["created_by"] = teacher_id
     if is_permanent is not None:
         kwargs["is_permanent"] = is_permanent
+    if room_type is not None:
+        kwargs["room_type"] = room.room_type
     if kwargs:
         await classroom_db.update_room(room_id, **kwargs)
 
@@ -2189,6 +2313,17 @@ async def get_curriculum_context(topic: str, max_tokens: int = None, language: s
     if not ctx:
         raise HTTPException(status_code=404, detail="No curriculum found for this topic")
     return {"topic": topic, "context": ctx, "char_count": len(ctx)}
+
+
+@router.get("/curriculum/section/{section_id}")
+async def get_curriculum_section_info(section_id: str):
+    """Get section info (title, chapter title, concepts) for display."""
+    from curriculum_manager import get_curriculum_manager
+    cm = get_curriculum_manager()
+    info = cm.get_section_info(section_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Section not found")
+    return info
 
 
 # ── Room Members Endpoint ──
