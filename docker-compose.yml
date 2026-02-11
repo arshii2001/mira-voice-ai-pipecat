@@ -55,18 +55,21 @@ services:
       dockerfile: Dockerfile
       args:
         - USE_SLIM=true  # Skip downloading large ML models for faster build
-    container_name: open-webui
+    container_name: mira-voice-webui
     ports:
-      - "3000:8080"
+      - "3005:8080"
     environment:
       # Pipecat Voice Integration
       - PIPECAT_ENABLED=true
       - PIPECAT_API_URL=http://localhost:7860
       - PIPECAT_CONNECTION_MODE=websocket
       
-      # Disable auth for local testing
-      - WEBUI_AUTH=false
-      - ENABLE_SIGNUP=true
+      # Enable real auth:
+      # - First account can still be created as admin (initial bootstrap)
+      # - Public signup stays disabled until admin enables it from Admin panel
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=false
+      - ENABLE_INITIAL_ADMIN_SIGNUP=true
       
       # Use OpenAI for text chat
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

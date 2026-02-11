@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import openai
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from translator import Translator, LANG_NAMES
@@ -392,6 +392,7 @@ class Room:
 
 DEFAULT_ROOM_ID = os.getenv("CLASSROOM_DEFAULT_ROOM_ID", "default")
 DEFAULT_ROOM_NAME = os.getenv("CLASSROOM_DEFAULT_ROOM_NAME", "Mira Classroom")
+CLASSROOM_AUTO_DELETE_EMPTY_ROOMS = os.getenv("CLASSROOM_AUTO_DELETE_EMPTY_ROOMS", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 class RoomManager:
@@ -1086,6 +1087,44 @@ class RoomManager:
             logger.error(f"[CLASSROOM] Failed to save message: {e}")
             return None
 
+    async def get_recent_room_messages(
+        self, room_id: str, user_language: str = "en", limit: int = 50
+    ) -> List[dict]:
+        """Fetch recent room messages for chat hydration when a user joins."""
+        try:
+            records = await classroom_db.get_messages_by_room(room_id, limit=limit)
+        except Exception as e:
+            logger.error(f"[CLASSROOM] Failed to load room history for {room_id}: {e}")
+            return []
+
+        messages: List[dict] = []
+        for rec in records:
+            text = rec.content or ""
+            translated = False
+            # Use persisted translation if available; avoid live translation on join.
+            try:
+                translations = json.loads(rec.translations) if rec.translations else {}
+            except Exception:
+                translations = {}
+
+            if user_language and rec.original_language and user_language != rec.original_language:
+                translated_text = translations.get(user_language)
+                if translated_text:
+                    text = translated_text
+                    translated = True
+
+            messages.append({
+                "id": rec.id,
+                "role": rec.role,
+                "speaker_name": rec.speaker_name,
+                "content": text,
+                "translated": translated,
+                "timestamp": rec.timestamp,
+                "reaction_counts": json.loads(rec.reaction_counts) if rec.reaction_counts else {},
+            })
+
+        return messages
+
     # ── Hand Raises ──
 
     async def raise_hand(self, room: Room, user_id: str, question_preview: str = None) -> Optional[dict]:
@@ -1358,6 +1397,10 @@ class RoomManager:
             return True
         return False
 
+    def is_room_deletable(self, room_id: str) -> bool:
+        """Whether the room exists and is not marked permanent."""
+        return room_id in self._rooms and room_id not in self._permanent_rooms
+
     # ── User management ──
 
     async def add_user(self, room_id: str, user: RoomUser) -> bool:
@@ -1565,7 +1608,10 @@ class RoomManager:
         # Don't delete room during grace period — check after grace expires
         if not room.users and not room._grace_speaker_id:
             await self._end_session(room)
-            await self.delete_room(room_id)
+            if CLASSROOM_AUTO_DELETE_EMPTY_ROOMS:
+                await self.delete_room(room_id)
+            else:
+                logger.info(f"[CLASSROOM] Room {room_id} is empty; keeping room (auto-delete disabled)")
 
     async def _speaker_grace_timeout(self, room: Room, user_id: str):
         """After grace period, if speaker hasn't reconnected, reassign token."""
@@ -1591,7 +1637,10 @@ class RoomManager:
             elif not room.users:
                 # Room is empty now
                 await self._end_session(room)
-                await self.delete_room(room.room_id)
+                if CLASSROOM_AUTO_DELETE_EMPTY_ROOMS:
+                    await self.delete_room(room.room_id)
+                else:
+                    logger.info(f"[CLASSROOM] Room {room.room_id} is empty after grace timeout; keeping room (auto-delete disabled)")
 
     # ── Speaker token ──
 
@@ -2074,16 +2123,168 @@ class ClassroomBroadcaster(FrameProcessor):
 router = APIRouter(prefix="/classroom", tags=["classroom"])
 
 
+def _get_request_actor(request: Request) -> dict:
+    """Extract caller identity from headers set by the frontend."""
+    user_id = (
+        request.headers.get("x-user-id")
+        or request.headers.get("x-openwebui-user-id")
+        or request.query_params.get("user_id")
+        or ""
+    ).strip()
+    user_name = (
+        request.headers.get("x-user-name")
+        or request.headers.get("x-openwebui-user-name")
+        or request.query_params.get("user_name")
+        or user_id
+    ).strip()
+    user_email = (
+        request.headers.get("x-user-email")
+        or request.headers.get("x-openwebui-user-email")
+        or request.query_params.get("user_email")
+        or ""
+    ).strip()
+    role = (
+        request.headers.get("x-user-role")
+        or request.headers.get("x-openwebui-user-role")
+        or request.query_params.get("user_role")
+        or "user"
+    ).strip().lower()
+
+    return {
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_email": user_email,
+        "role": role,
+        "is_admin": role == "admin",
+    }
+
+
+async def _require_admin(request: Request) -> dict:
+    actor = _get_request_actor(request)
+    if not actor["user_id"]:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+    if not actor["is_admin"]:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return actor
+
+
+async def _require_teacher_or_admin(request: Request) -> dict:
+    actor = _get_request_actor(request)
+    if not actor["user_id"]:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+    is_teacher = await classroom_db.is_teacher(actor["user_id"])
+    actor["is_teacher"] = is_teacher
+    if not (actor["is_admin"] or is_teacher):
+        raise HTTPException(
+            status_code=403,
+            detail="Teacher role required. Submit a teacher-role request first.",
+        )
+    return actor
+
+
+@router.get("/teacher-status")
+async def get_teacher_status(request: Request):
+    """Get caller's teacher-role status and latest request state."""
+    actor = _get_request_actor(request)
+    if not actor["user_id"]:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+
+    is_teacher = await classroom_db.is_teacher(actor["user_id"])
+    latest = await classroom_db.get_latest_teacher_role_request(actor["user_id"])
+    return {
+        "user_id": actor["user_id"],
+        "is_admin": actor["is_admin"],
+        "is_teacher": is_teacher,
+        "latest_request": latest.to_dict() if latest else None,
+    }
+
+
+@router.post("/teacher-requests")
+async def request_teacher_role(request: Request, purpose: str = ""):
+    """Create a teacher-role request for the caller."""
+    actor = _get_request_actor(request)
+    if not actor["user_id"]:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+    if actor["is_admin"]:
+        raise HTTPException(status_code=400, detail="Admins already have teacher privileges")
+    if await classroom_db.is_teacher(actor["user_id"]):
+        raise HTTPException(status_code=400, detail="User is already an approved teacher")
+
+    req = await classroom_db.create_teacher_role_request(
+        user_id=actor["user_id"],
+        user_name=actor["user_name"] or actor["user_id"],
+        user_email=actor["user_email"],
+        purpose=purpose,
+    )
+    return req.to_dict()
+
+
+@router.get("/teacher-requests")
+async def list_teacher_role_requests(
+    request: Request,
+    status: str = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Admin panel: list teacher-role requests."""
+    await _require_admin(request)
+    requests = await classroom_db.list_teacher_role_requests(
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return {"requests": [r.to_dict() for r in requests]}
+
+
+@router.post("/teacher-requests/{request_id}/approve")
+async def approve_teacher_role_request(request_id: str, request: Request, note: str = ""):
+    """Admin action: approve a teacher-role request."""
+    actor = await _require_admin(request)
+    reviewed = await classroom_db.review_teacher_role_request(
+        request_id=request_id,
+        approved=True,
+        reviewed_by=actor["user_id"],
+        note=note,
+    )
+    if not reviewed:
+        raise HTTPException(status_code=404, detail="Teacher-role request not found")
+    return reviewed.to_dict()
+
+
+@router.post("/teacher-requests/{request_id}/reject")
+async def reject_teacher_role_request(request_id: str, request: Request, note: str = ""):
+    """Admin action: reject a teacher-role request."""
+    actor = await _require_admin(request)
+    reviewed = await classroom_db.review_teacher_role_request(
+        request_id=request_id,
+        approved=False,
+        reviewed_by=actor["user_id"],
+        note=note,
+    )
+    if not reviewed:
+        raise HTTPException(status_code=404, detail="Teacher-role request not found")
+    return reviewed.to_dict()
+
+
 @router.post("/rooms")
-async def create_room(name: str = "Classroom", teacher_id: str = None,
-                      teacher_name: str = None, topic: str = None,
-                      is_permanent: bool = False, room_type: str = "teacher_driven",
-                      curriculum_chapter_id: str = None,
-                      curriculum_section_id: str = None):
-    """Create a new classroom room. The creator becomes the teacher."""
+async def create_room(
+    request: Request,
+    name: str = "Classroom",
+    topic: str = None,
+    is_permanent: bool = False,
+    room_type: str = "teacher_driven",
+    curriculum_chapter_id: str = None,
+    curriculum_section_id: str = None,
+):
+    """Create a new classroom room. Only approved teachers/admins can create."""
+    actor = await _require_teacher_or_admin(request)
     room = await room_manager.create_room(
-        name=name, teacher_id=teacher_id, teacher_name=teacher_name,
-        topic=topic, is_permanent=is_permanent, room_type=room_type,
+        name=name,
+        teacher_id=actor["user_id"],
+        teacher_name=actor.get("user_name") or actor["user_id"],
+        topic=topic,
+        is_permanent=is_permanent,
+        room_type=room_type,
         curriculum_chapter_id=curriculum_chapter_id,
         curriculum_section_id=curriculum_section_id,
     )
@@ -2106,11 +2307,27 @@ async def get_room(room_id: str):
 
 
 @router.delete("/rooms/{room_id}")
-async def delete_room(room_id: str):
-    """Delete a room."""
+async def delete_room(room_id: str, request: Request):
+    """Delete a room.
+
+    Rules:
+      - Admins can delete any non-permanent room.
+      - Teachers can delete only rooms they created.
+    """
+    actor = await _require_teacher_or_admin(request)
+    room = room_manager.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    if not actor["is_admin"] and room.teacher_id != actor["user_id"]:
+        raise HTTPException(status_code=403, detail="Only the room creator can delete this room")
+
+    if not room_manager.is_room_deletable(room_id):
+        raise HTTPException(status_code=403, detail="This room cannot be deleted")
+
     if await room_manager.delete_room(room_id):
         return {"status": "deleted"}
-    raise HTTPException(status_code=404, detail="Room not found")
+    raise HTTPException(status_code=500, detail="Failed to delete room")
 
 
 @router.post("/rooms/{room_id}/token")
@@ -2446,8 +2663,9 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             mode=mode,
         )
 
-        # If no teacher assigned yet, the first user to join becomes teacher
-        if room.teacher_id is None:
+        # Legacy fallback: if no teacher is set, only the first user in an
+        # empty room becomes teacher. Never rotate teacher on later joins.
+        if room.teacher_id is None and len(room.users) == 0:
             room.teacher_id = user_id
             logger.info(f"[CLASSROOM] {name} ({user_id}) is now the teacher of room {room_id}")
 
@@ -2458,7 +2676,12 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             await websocket.close()
             return
 
-        # Send room state to new user FIRST (use user object which may have been updated from DB)
+        # Send room state + recent chat history to the new user FIRST
+        recent_messages = await room_manager.get_recent_room_messages(
+            room_id=room_id,
+            user_language=user.language,
+            limit=60,
+        )
         await websocket.send_json({
             "type": "joined",
             "room": room.to_dict(),
@@ -2470,6 +2693,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                 "is_speaker": user.is_speaker,
                 "is_teacher": user_id == room.teacher_id,
             },
+            "recent_messages": recent_messages,
         })
 
         # NOW auto-assign speaker token if first user (after 'joined' is sent)
@@ -2524,6 +2748,20 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     )
                 else:
                     await websocket.send_json({"type": "error", "message": "Only the speaker can send messages"})
+
+            elif msg_type == "speaker_transcript":
+                # Speaker voice transcript (final) forwarded by frontend.
+                # This is broadcast-only; LLM response already comes from voice pipeline.
+                text = data.get("text", "").strip()
+                room = room_manager.get_room(room_id)
+                if text and room and room.speaker_id == user.user_id:
+                    logger.info(f"[CLASSROOM] Speaker transcript from {user.name}: {text[:60]}")
+                    await room_manager.broadcast_transcription(
+                        room=room,
+                        speaker_id=user.user_id,
+                        text=text,
+                        language=user.language,
+                    )
 
             elif msg_type == "teacher_action":
                 # Teacher toolbar action — converts to a special LLM prompt
@@ -2757,5 +2995,3 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
         )
         if user:
             await room_manager.remove_user(room_id, user.user_id)
-
-
