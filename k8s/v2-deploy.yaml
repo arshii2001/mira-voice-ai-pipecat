@@ -1,8 +1,8 @@
 # ============================================================
-# Mira v2.0 Deployment - Pipecat + OpenWebUI
+# Mira v3.0 Deployment - Pipecat + OpenWebUI
 # Namespace: openwebui
-# Images: iaienterpriseacr.azurecr.io/audio:mira-voice-v2.0
-#         iaienterpriseacr.azurecr.io/audio:mira-openwebui-v2.0
+# Images: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.0
+#         iaienterpriseacr.azurecr.io/audio:mira-openwebui-v3.0
 # ============================================================
 
 ---
@@ -84,7 +84,7 @@ spec:
         - name: acr-iaienterpriseacr
       containers:
         - name: pipecat-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v2.0
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.0
           imagePullPolicy: Always
           ports:
             - containerPort: 7860
@@ -258,7 +258,7 @@ spec:
         - name: acr-iaienterpriseacr
       containers:
         - name: openwebui-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-openwebui-v2.0
+          image: iaienterpriseacr.azurecr.io/audio:mira-openwebui-v3.0
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
