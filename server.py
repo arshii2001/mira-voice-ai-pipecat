@@ -22,10 +22,12 @@ from typing import List, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from auth import AUTH_ENABLED, decode_openwebui_jwt, extract_bearer_token, get_verified_user_id
 
 from bot import (
     run_bot,
@@ -61,6 +63,19 @@ logger = logging.getLogger(__name__)
 # Server configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "7860"))
+
+
+# ── JWT auth dependency for all REST endpoints ──────────────────────
+async def _require_jwt(request: Request):
+    """FastAPI dependency: reject requests without a valid JWT when auth is enabled."""
+    if not AUTH_ENABLED:
+        return  # Dev/test mode — no JWT required
+
+    auth_header = request.headers.get("authorization")
+    user_id = get_verified_user_id(auth_header)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Valid JWT required")
+    return user_id
 
 
 def _normalize_user_language(lang: Optional[str]) -> str:
@@ -124,13 +139,13 @@ app.add_middleware(
 app.include_router(classroom_router)
 
 
-@app.get("/health")
+@app.get("/health", dependencies=[Depends(_require_jwt)])
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "mira-voice-ai-pipecat"}
 
 
-@app.get("/metrics")
+@app.get("/metrics", dependencies=[Depends(_require_jwt)])
 async def metrics():
     """Server-side performance metrics.
 
@@ -141,7 +156,7 @@ async def metrics():
     return _metrics_collector.snapshot()
 
 
-@app.post("/connect")
+@app.post("/connect", dependencies=[Depends(_require_jwt)])
 async def connect():
     """Return WebSocket URL for direct connection to backend."""
     public_host = os.getenv("PUBLIC_HOST", "hp-fury")
@@ -166,7 +181,7 @@ class ChatRequest(BaseModel):
     user_name: Optional[str] = None
     topic: Optional[str] = None
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(_require_jwt)])
 async def chat_completion(req: ChatRequest):
     """
     Text chat endpoint — proxies to the same LLM that Pipecat uses for voice.
@@ -269,7 +284,7 @@ async def chat_completion(req: ChatRequest):
             return resp.json()
 
 
-@app.get("/config")
+@app.get("/config", dependencies=[Depends(_require_jwt)])
 async def get_config():
     """Get current server configuration — all values come from env vars."""
     lang_hints = [h.strip() for h in STT_LANGUAGE_HINTS.split(",") if h.strip()]
@@ -368,6 +383,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             speaker_name = data.get("speaker_name")
             speaker_language = data.get("speaker_language")
             language = data.get("language")
+            token = data.get("token")  # JWT for auth
 
             return {
                 "system_prompt": system_prompt,
@@ -379,6 +395,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 "speaker_name": speaker_name,
                 "speaker_language": speaker_language,
                 "language": language,
+                "token": token,
             }
         else:
             logger.info("First message was not a config message, using defaults")
@@ -392,6 +409,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 "speaker_name": None,
                 "speaker_language": None,
                 "language": None,
+                "token": None,
             }
 
     except asyncio.TimeoutError:
@@ -406,6 +424,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "speaker_name": None,
             "speaker_language": None,
             "language": None,
+            "token": None,
         }
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in config message: {e}, using defaults")
@@ -419,6 +438,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "speaker_name": None,
             "speaker_language": None,
             "language": None,
+            "token": None,
         }
     except Exception as e:
         logger.warning(f"Error receiving config: {e}, using defaults")
@@ -432,6 +452,7 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "speaker_name": None,
             "speaker_language": None,
             "language": None,
+            "token": None,
         }
 
 
@@ -491,6 +512,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Wait for optional config message (5s timeout for high-latency connections like Tailscale Ingress)
     config = await receive_client_config(websocket, timeout=5.0)
+
+    # ── JWT auth on WebSocket ──────────────────────────────────────
+    if AUTH_ENABLED:
+        ws_token = config.get("token")
+        if not ws_token:
+            await websocket.send_json({"type": "error", "message": "Authentication required"})
+            await websocket.close(code=4401)
+            return
+        payload = decode_openwebui_jwt(ws_token)
+        if not payload or "id" not in payload:
+            await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
+            await websocket.close(code=4401)
+            return
+        logger.info(f"[AUTH] WS authenticated: user_id={payload['id']}")
 
     # Send session_id to the client so it can use /inject_text
     try:
@@ -603,7 +638,7 @@ class InjectTextRequest(BaseModel):
     text: str
 
 
-@app.post("/inject_text")
+@app.post("/inject_text", dependencies=[Depends(_require_jwt)])
 async def inject_text(req: InjectTextRequest):
     """
     Inject typed text into an active voice pipeline session.
@@ -625,7 +660,7 @@ async def inject_text(req: InjectTextRequest):
     return {"status": "ok", "session_id": req.session_id}
 
 
-@app.get("/voices")
+@app.get("/voices", dependencies=[Depends(_require_jwt)])
 async def list_voices():
     """List available TTS voices."""
     # Svara TTS voices (English, Hindi, Tamil only)
@@ -663,7 +698,7 @@ async def list_voices():
     }
 
 
-@app.get("/languages")
+@app.get("/languages", dependencies=[Depends(_require_jwt)])
 async def list_languages():
     """List supported STT languages."""
     languages = [

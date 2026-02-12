@@ -719,6 +719,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" | "male"
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
 TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")          # API key for Svara TTS auth
+TTS_MAX_TOKENS = int(os.getenv("TTS_MAX_TOKENS", "350"))   # Max tokens per Svara TTS request (text is chunked by sentence)
 TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova")  # For OpenAI TTS provider
 
@@ -727,10 +728,10 @@ DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "en_female")   # Default voice for Sv
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
 # VAD params as env vars for tuning without code change
-VAD_CONFIDENCE = float(os.getenv("VAD_CONFIDENCE", "0.7"))
+VAD_CONFIDENCE = float(os.getenv("VAD_CONFIDENCE", "0.5"))
 VAD_START_SECS = float(os.getenv("VAD_START_SECS", "0.2"))
-VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "0.6"))
-VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.6"))
+VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "1.0"))
+VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.4"))
 
 # Prompt configuration
 PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -887,6 +888,7 @@ def create_tts_service(sample_rate: int = None):
             base_url=tts_base_url,
             api_key=TTS_WS_API_KEY,
             voice=DEFAULT_VOICE,
+            max_tokens=TTS_MAX_TOKENS,
             streaming=True,
             sample_rate=sr,
         )
@@ -1034,8 +1036,9 @@ async def create_bot_pipeline(
     effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
     messages = [{"role": "system", "content": effective_prompt}]
     logger.info(f"[PIPELINE] System prompt: {len(effective_prompt)} chars (version={PROMPT_VERSION})")
-    # Pre-seed the greeting only when greeting is enabled for this session.
-    if not skip_greeting:
+    # Pre-seed the greeting only for 1:1 tutor sessions (not classroom/discussion).
+    # Classroom greeting is handled separately by send_first_join_greeting().
+    if not skip_greeting and not is_classroom:
         messages.append({"role": "assistant", "content": GREETING_TEXT})
     if context_messages:
         messages.extend(context_messages)

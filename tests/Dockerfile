@@ -30,6 +30,7 @@ COPY tests/run_all_tests.py /app/tests/
 COPY classroom.py /app/
 COPY database.py /app/
 COPY translator.py /app/
+COPY auth.py /app/
 COPY curriculum_manager.py /app/
 COPY bot.py /app/
 COPY server.py /app/

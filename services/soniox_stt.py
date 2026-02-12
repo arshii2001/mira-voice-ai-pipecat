@@ -284,66 +284,65 @@ class SonioxSTTService(FrameProcessor):
 
     async def _connect(self):
         """Establish persistent WebSocket connection to Soniox server."""
-        if self._connected:
-            return
+        async with self._connect_lock:
+            if self._connected and self._websocket:
+                return
 
-        if self._connecting:
-            logger.debug("Connection already in progress, skipping")
-            return
-
-        self._connecting = True
-        try:
-            logger.info(f"Connecting to Soniox at {SONIOX_WS_URL}")
-
-            self._websocket = await websocket_connect(
-                SONIOX_WS_URL,
-                max_size=10 * 1024 * 1024,
-                ping_interval=20,
-                ping_timeout=20,
-                close_timeout=10,
-            )
-
-            # Send configuration with API key - Soniox realtime format
-            config = {
-                "api_key": self._config.api_key,
-                "model": self._config.model,
-                "language_hints": self._config.language_hints,
-                "language_hints_strict": self._config.language_hints_strict,
-                "enable_language_identification": self._config.enable_language_identification,
-                "enable_endpoint_detection": self._config.enable_endpoint_detection,
-                "audio_format": "pcm_s16le",
-                "sample_rate": self._config.sample_rate,
-                "num_channels": self._config.num_channels,
-            }
-
-            # Log config being sent (without API key)
-            config_log = {k: v for k, v in config.items() if k != "api_key"}
-            logger.info(f"Soniox config: {json.dumps(config_log)}")
-
-            await self._websocket.send(json.dumps(config))
-            logger.info(f"Sent Soniox config: model={self._config.model}, include_nonfinal={self._config.include_nonfinal}")
-
-            # Wait for initial response/acknowledgment from Soniox
+            self._connecting = True
             try:
-                init_response = await asyncio.wait_for(self._websocket.recv(), timeout=5.0)
-                logger.info(f"Soniox initial response: {init_response}")
-            except asyncio.TimeoutError:
-                logger.warning("No initial response from Soniox (continuing anyway)")
+                logger.info(f"Connecting to Soniox at {SONIOX_WS_URL}")
+
+                self._websocket = await websocket_connect(
+                    SONIOX_WS_URL,
+                    max_size=10 * 1024 * 1024,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
+                )
+
+                # Send configuration with API key - Soniox realtime format
+                config = {
+                    "api_key": self._config.api_key,
+                    "model": self._config.model,
+                    "language_hints": self._config.language_hints,
+                    "language_hints_strict": self._config.language_hints_strict,
+                    "enable_language_identification": self._config.enable_language_identification,
+                    "enable_endpoint_detection": self._config.enable_endpoint_detection,
+                    "audio_format": "pcm_s16le",
+                    "sample_rate": self._config.sample_rate,
+                    "num_channels": self._config.num_channels,
+                }
+
+                # Log config being sent (without API key)
+                config_log = {k: v for k, v in config.items() if k != "api_key"}
+                logger.info(f"Soniox config: {json.dumps(config_log)}")
+
+                await self._websocket.send(json.dumps(config))
+                logger.info(f"Sent Soniox config: model={self._config.model}, include_nonfinal={self._config.include_nonfinal}")
+
+                # Wait for initial response/acknowledgment from Soniox
+                try:
+                    init_response = await asyncio.wait_for(self._websocket.recv(), timeout=5.0)
+                    logger.info(f"Soniox initial response: {init_response}")
+                except asyncio.TimeoutError:
+                    logger.warning("No initial response from Soniox (continuing anyway)")
+                except Exception as e:
+                    logger.warning(f"Error receiving initial response: {e}")
+
+                self._connected = True
+                logger.info("Connected to Soniox")
+
+                # Start receiving messages in background
+                self._receive_task = asyncio.create_task(self._receive_messages())
+
             except Exception as e:
-                logger.warning(f"Error receiving initial response: {e}")
-
-            self._connected = True
-            logger.info("Connected to Soniox")
-
-            # Start receiving messages in background
-            self._receive_task = asyncio.create_task(self._receive_messages())
-
-        except Exception as e:
-            logger.error(f"Failed to connect to Soniox: {e}")
-            await self.push_frame(ErrorFrame(error=f"Soniox connection failed: {e}"))
-            raise
-        finally:
-            self._connecting = False
+                logger.error(f"Failed to connect to Soniox: {e}")
+                self._websocket = None
+                self._connected = False
+                await self.push_frame(ErrorFrame(error=f"Soniox connection failed: {e}"))
+                raise
+            finally:
+                self._connecting = False
 
     async def _disconnect(self):
         """Disconnect from Soniox server."""
@@ -385,25 +384,109 @@ class SonioxSTTService(FrameProcessor):
         await self._connect()
 
     async def _receive_messages(self):
-        """Continuously receive and process messages from Soniox."""
+        """Continuously receive and process messages from Soniox.
+
+        Auto-reconnects with exponential backoff (up to 3 retries) when the
+        WebSocket connection drops unexpectedly.
+
+        IMPORTANT: This is the ONLY coroutine that should reconnect. Other
+        callers (_process_audio, _keepalive_loop) must NOT attempt their own
+        reconnect — they simply skip work when disconnected.
+        """
+        MAX_RECONNECT_RETRIES = 3
+        reconnect_attempt = 0
+
         try:
-            while self._connected and self._websocket:
+            while True:
+                # Grab a local reference to avoid races with other coroutines
+                ws = self._websocket
+
+                if not self._connected or ws is None:
+                    # Connection lost — attempt inline reconnect (don't call
+                    # _reconnect/_disconnect which would cancel this task).
+                    if reconnect_attempt >= MAX_RECONNECT_RETRIES:
+                        logger.error(
+                            f"Soniox: exhausted {MAX_RECONNECT_RETRIES} reconnect attempts, giving up"
+                        )
+                        break
+
+                    backoff = min(0.5 * (2 ** reconnect_attempt), 4.0)
+                    reconnect_attempt += 1
+                    logger.warning(
+                        f"Soniox: auto-reconnect attempt {reconnect_attempt}/{MAX_RECONNECT_RETRIES} "
+                        f"in {backoff:.1f}s"
+                    )
+                    await asyncio.sleep(backoff)
+                    try:
+                        # Close old socket if it exists
+                        old_ws = self._websocket
+                        self._websocket = None
+                        self._connected = False
+                        if old_ws:
+                            try:
+                                await old_ws.close()
+                            except Exception:
+                                pass
+
+                        # Open new connection directly (bypass _connect lock to
+                        # avoid deadlock since we ARE the receive task)
+                        new_ws = await websocket_connect(
+                            SONIOX_WS_URL,
+                            max_size=10 * 1024 * 1024,
+                            ping_interval=20,
+                            ping_timeout=20,
+                            close_timeout=10,
+                        )
+                        config = {
+                            "api_key": self._config.api_key,
+                            "model": self._config.model,
+                            "language_hints": self._config.language_hints,
+                            "language_hints_strict": self._config.language_hints_strict,
+                            "enable_language_identification": self._config.enable_language_identification,
+                            "enable_endpoint_detection": self._config.enable_endpoint_detection,
+                            "audio_format": "pcm_s16le",
+                            "sample_rate": self._config.sample_rate,
+                            "num_channels": self._config.num_channels,
+                        }
+                        await new_ws.send(json.dumps(config))
+                        try:
+                            await asyncio.wait_for(new_ws.recv(), timeout=5.0)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                        # Atomically publish the new connection
+                        self._websocket = new_ws
+                        self._connected = True
+                        reconnect_attempt = 0
+                        logger.info("Soniox: auto-reconnect succeeded")
+                    except Exception as e:
+                        logger.error(f"Soniox: auto-reconnect failed: {e}")
+                        self._websocket = None
+                        self._connected = False
+                        continue
+
+                # Re-grab after potential reconnect
+                ws = self._websocket
+                if ws is None:
+                    continue
+
                 try:
-                    msg = await self._websocket.recv()
+                    msg = await ws.recv()
                     data = json.loads(msg)
                     await self._handle_message(data)
+                    # Successful message resets the reconnect counter
+                    reconnect_attempt = 0
                 except websockets.ConnectionClosed as e:
                     logger.warning(f"Soniox WebSocket connection closed: {e}")
                     self._connected = False
                     self._websocket = None
-                    break
+                    # Loop will attempt reconnect on next iteration
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON from Soniox: {e}")
                 except Exception as e:
                     logger.error(f"Error receiving from Soniox: {e}")
                     self._connected = False
                     self._websocket = None
-                    break
+                    # Loop will attempt reconnect on next iteration
         except asyncio.CancelledError:
             pass
         finally:
@@ -555,10 +638,13 @@ class SonioxSTTService(FrameProcessor):
             # Reset per-utterance language state to avoid stale carry-over.
             self._detected_language = None
             self._last_logged_raw_language = None
-            # Connect to Soniox when user starts speaking (lazy connection)
-            if not self._connected:
-                logger.info("User started speaking - connecting to Soniox")
+            # If not connected yet (first time), use _connect(). If a
+            # _receive_task already exists, it owns reconnection.
+            if not self._connected and self._receive_task is None:
+                logger.info("User started speaking - connecting to Soniox (first time)")
                 await self._connect()
+            elif not self._connected:
+                logger.info("User started speaking but Soniox reconnecting — audio may be dropped briefly")
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
@@ -566,10 +652,11 @@ class SonioxSTTService(FrameProcessor):
             logger.info("User stopped speaking - sending end signal to Soniox")
 
             # Send empty string to signal end of audio segment
-            if self._connected and self._websocket:
+            ws = self._websocket  # Local ref
+            if self._connected and ws is not None:
                 try:
                     # Send empty string to finalize current utterance
-                    await self._websocket.send("")
+                    await ws.send("")
                     logger.debug("End signal sent to Soniox")
                 except websockets.ConnectionClosed as e:
                     logger.warning(f"Connection closed when sending end signal: {e}")
@@ -592,9 +679,14 @@ class SonioxSTTService(FrameProcessor):
             await self.push_frame(frame, direction)
 
     async def _process_audio(self, frame: InputAudioRawFrame):
-        """Process audio frame and send to Soniox."""
-        # Only send audio if connected - connection is established on UserStartedSpeakingFrame
-        if not self._connected or not self._websocket:
+        """Process audio frame and send to Soniox.
+
+        If the connection is dead, silently drops audio. The _receive_messages
+        loop is solely responsible for reconnection to avoid race conditions.
+        """
+        ws = self._websocket  # Local ref to avoid races
+        if not self._connected or ws is None:
+            # _receive_messages will reconnect; just drop this frame
             return
 
         try:
@@ -614,12 +706,11 @@ class SonioxSTTService(FrameProcessor):
                 return
 
             # Send audio to Soniox
-            await self._websocket.send(audio_bytes)
+            await ws.send(audio_bytes)
             logger.debug(f"Sent {len(audio_bytes)} bytes of audio to Soniox")
 
         except websockets.ConnectionClosed:
-            # Don't reconnect immediately - will reconnect on next UserStartedSpeakingFrame
-            logger.warning("Soniox connection closed during audio send")
+            logger.warning("Soniox connection closed during audio send — _receive_messages will reconnect")
             self._connected = False
             self._websocket = None
         except Exception as e:
@@ -632,19 +723,23 @@ class SonioxSTTService(FrameProcessor):
         silence_bytes = silence.tobytes()
 
         try:
-            while self._bot_speaking and self._connected and self._websocket:
+            while self._bot_speaking:
                 try:
                     await asyncio.sleep(1.0)  # Send keepalive every second
-                    if self._connected and self._websocket and self._bot_speaking:
-                        await self._websocket.send(silence_bytes)
+                    ws = self._websocket  # Local ref to avoid races
+                    if self._connected and ws is not None and self._bot_speaking:
+                        await ws.send(silence_bytes)
                         logger.debug("Sent keepalive silence to Soniox")
+                    elif not self._connected:
+                        # Connection lost — skip keepalive; _receive_messages handles reconnect
+                        logger.debug("Keepalive skipped — not connected, waiting for reconnect")
                 except websockets.ConnectionClosed:
-                    logger.warning("Connection closed during keepalive")
+                    logger.warning("Connection closed during keepalive — _receive_messages will reconnect")
                     self._connected = False
                     self._websocket = None
-                    break
+                    # Don't break — stay in loop so keepalive resumes after reconnect
                 except Exception as e:
                     logger.warning(f"Keepalive error: {e}")
-                    break
+                    # Don't break — transient errors shouldn't kill keepalive
         except asyncio.CancelledError:
             pass

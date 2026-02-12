@@ -218,14 +218,16 @@ async def api_create_room(
 
 
 async def api_list_rooms() -> dict:
+    headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{HTTP_URL}/classroom/rooms") as resp:
+        async with session.get(f"{HTTP_URL}/classroom/rooms", headers=headers) as resp:
             return await resp.json()
 
 
 async def api_get_room(room_id: str) -> dict:
+    headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{HTTP_URL}/classroom/rooms/{room_id}") as resp:
+        async with session.get(f"{HTTP_URL}/classroom/rooms/{room_id}", headers=headers) as resp:
             return await resp.json()
 
 
@@ -612,23 +614,26 @@ async def test_mode_switch() -> TestResult:
         logger.info("  Priya joined in text_only mode ✓")
         await drain_messages(ws_priya, duration=1.0)
 
+        # Drain any pending messages (e.g. first-join greeting, token_changed)
+        await drain_messages(ws_priya, duration=2.0)
+
         # Switch to text_and_audio
         await ws_priya.send(json.dumps({"type": "set_mode", "mode": "text_and_audio"}))
-        resp = await recv_json_nonbinary(ws_priya, timeout=3.0)
+        resp = await wait_for_message_type(ws_priya, "mode_changed", timeout=5.0)
         assert resp and resp.get("type") == "mode_changed"
         assert resp["mode"] == "text_and_audio"
         logger.info("  Priya switched to text_and_audio ✓")
 
         # Switch back to text_only
         await ws_priya.send(json.dumps({"type": "set_mode", "mode": "text_only"}))
-        resp2 = await recv_json_nonbinary(ws_priya, timeout=3.0)
+        resp2 = await wait_for_message_type(ws_priya, "mode_changed", timeout=5.0)
         assert resp2 and resp2.get("type") == "mode_changed"
         assert resp2["mode"] == "text_only"
         logger.info("  Priya switched back to text_only ✓")
 
         # Invalid mode
         await ws_priya.send(json.dumps({"type": "set_mode", "mode": "video_only"}))
-        err = await recv_json_nonbinary(ws_priya, timeout=3.0)
+        err = await wait_for_message_type(ws_priya, "error", timeout=5.0)
         assert err and err.get("type") == "error"
         logger.info("  Invalid mode rejected ✓")
 
@@ -656,10 +661,11 @@ async def test_user_disconnect() -> TestResult:
         ws_priya = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
 
         await join_room(ws_ravi, room_id, "ravi-01", "Ravi", "en")
-        await drain_messages(ws_ravi, duration=1.0)
+        await drain_messages(ws_ravi, duration=2.0)
 
         await join_room(ws_priya, room_id, "priya-01", "Priya", "hi")
-        await drain_messages(ws_priya, duration=1.0)
+        # Drain long enough for greeting translation + finalize_join to complete
+        await drain_messages(ws_priya, duration=3.0)
 
         # Verify Ravi is speaker
         state = await api_get_room(room_id)
@@ -771,10 +777,11 @@ async def test_speaker_grace_restore() -> TestResult:
         ws_priya = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
 
         await join_room(ws_ravi, room_id, "ravi-grace", "Ravi", "en")
-        await drain_messages(ws_ravi, duration=1.5)
+        await drain_messages(ws_ravi, duration=2.0)
 
         await join_room(ws_priya, room_id, "priya-grace", "Priya", "hi")
-        await drain_messages(ws_priya, duration=1.0)
+        # Drain long enough for greeting translation + finalize_join to complete
+        await drain_messages(ws_priya, duration=3.0)
 
         # Verify Ravi is speaker
         state = await api_get_room(room_id)
@@ -1322,20 +1329,21 @@ async def test_session_history_and_summary() -> TestResult:
             )
 
         # Fetch session list + session details via REST
+        rest_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/classroom/sessions") as resp:
+            async with session.get(f"{HTTP_URL}/classroom/sessions", headers=rest_headers) as resp:
                 sessions_payload = await resp.json()
                 session_ids = [s["id"] for s in sessions_payload.get("sessions", [])]
                 assert session_id in session_ids
 
-            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}") as resp:
+            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}", headers=rest_headers) as resp:
                 session_payload = await resp.json()
                 assert len(session_payload.get("messages", [])) >= 3
 
             # Store summary/quiz and verify retrieval
             quiz = [{"question": "Q1", "options": ["A", "B"], "correct": 0, "explanation": "A"}]
             await classroom_db.set_session_summary(session_id, summary="Summary text", quiz_json=json.dumps(quiz))
-            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}/summary") as resp:
+            async with session.get(f"{HTTP_URL}/classroom/sessions/{session_id}/summary", headers=rest_headers) as resp:
                 summary_payload = await resp.json()
                 assert summary_payload.get("summary") == "Summary text"
                 assert summary_payload.get("quiz") == quiz
@@ -1383,8 +1391,9 @@ async def test_topics_and_dashboard() -> TestResult:
         assert topics == ["Topic A", "Topic B", "Topic C"]
 
         # API: dashboard should return stats
+        dash_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/classroom/dashboard") as resp:
+            async with session.get(f"{HTTP_URL}/classroom/dashboard", headers=dash_headers) as resp:
                 payload = await resp.json()
                 assert "total_sessions" in payload
                 assert "total_messages" in payload

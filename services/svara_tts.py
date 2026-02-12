@@ -51,7 +51,7 @@ class SvaraTTSConfig:
     voice: str = "en_female"
     temperature: float = 0.75
     top_p: float = 0.9
-    max_tokens: int = 1500
+    max_tokens: int = 350  # Svara's per-request limit; long text is chunked by sentence
     repetition_penalty: float = 1.1
 
 
@@ -76,7 +76,7 @@ class SvaraTTSService(TTSService):
         voice: str = "en_female",
         temperature: float = 0.75,
         top_p: float = 0.9,
-        max_tokens: int = 1500,
+        max_tokens: int = 350,
         repetition_penalty: float = 1.1,
         streaming: bool = True,
         sample_rate: int = 24000,
@@ -215,8 +215,9 @@ class SvaraTTSService(TTSService):
         Synthesize text to speech with barge-in support.
 
         This is the core method required by TTSService base class.
-        Yields audio frames as they are generated.
-        Checks for interruption flag to abort early on barge-in.
+        Pipecat's sentence aggregator calls this once per sentence
+        (not once per full LLM response), so each call is already
+        a single sentence within Svara's ~350 token limit.
 
         Args:
             text: Text to synthesize
@@ -235,7 +236,7 @@ class SvaraTTSService(TTSService):
         if not self._session:
             self._session = aiohttp.ClientSession()
 
-        logger.info(f"TTS INPUT TEXT: '{text}' [voice={self._config.voice}]")
+        logger.info(f"TTS INPUT TEXT ({len(text)} chars): '{text}' [voice={self._config.voice}]")
 
         # Reset interrupted flag at start of new generation
         self._interrupted = False
@@ -352,7 +353,13 @@ class SvaraTTSService(TTSService):
                         msg_type = data.get("type")
 
                         if msg_type == "done":
-                            logger.debug(f"TTS done: {data.get('audio_duration', 0):.2f}s")
+                            audio_dur = data.get('audio_duration', 0)
+                            logger.info(
+                                f"TTS done: text_len={len(text)} chars, "
+                                f"audio_duration={audio_dur:.2f}s, "
+                                f"max_tokens={self._config.max_tokens}, "
+                                f"voice={self._config.voice}"
+                            )
                             break
                         elif msg_type == "error":
                             raise RuntimeError(data.get("message", "Unknown error"))

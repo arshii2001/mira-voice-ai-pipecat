@@ -19,6 +19,9 @@ httpx==0.27.0
 numpy==1.26.4
 scipy==1.14.1
 
+# JWT authentication (shared secret with OpenWebUI)
+PyJWT==2.9.0
+
 # Database
 aiosqlite==0.20.0
 

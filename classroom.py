@@ -60,6 +60,7 @@ from starlette.websockets import WebSocketState
 from translator import Translator, LANG_NAMES
 from database import db as classroom_db
 from bot import load_system_prompt, PROMPT_VERSION
+from auth import AUTH_ENABLED, get_verified_user_id, extract_bearer_token, decode_openwebui_jwt
 
 logger = logging.getLogger(__name__)
 
@@ -1134,7 +1135,12 @@ class RoomManager:
     async def get_recent_room_messages(
         self, room_id: str, user_language: str = "en", limit: int = 50
     ) -> List[dict]:
-        """Fetch recent room messages for chat hydration when a user joins."""
+        """Fetch recent room messages for chat hydration when a user joins.
+
+        If a cached translation is missing for the joining user's language,
+        performs a live translation and caches it back to the DB so
+        subsequent joins don't re-translate.
+        """
         try:
             records = await classroom_db.get_messages_by_room(room_id, limit=limit)
         except Exception as e:
@@ -1142,10 +1148,12 @@ class RoomManager:
             return []
 
         messages: List[dict] = []
+        # Collect messages that need live translation (batch for efficiency logging)
+        live_translate_count = 0
+
         for rec in records:
             text = rec.content or ""
             translated = False
-            # Use persisted translation if available; avoid live translation on join.
             try:
                 translations = json.loads(rec.translations) if rec.translations else {}
             except Exception:
@@ -1156,6 +1164,32 @@ class RoomManager:
                 if translated_text:
                     text = translated_text
                     translated = True
+                elif self._translator and rec.content:
+                    # Live-translate missing language and cache back to DB
+                    try:
+                        translated_text = await self._translator.translate(
+                            rec.content,
+                            target_lang=user_language,
+                            source_lang=rec.original_language,
+                        )
+                        if translated_text and translated_text != rec.content:
+                            text = translated_text
+                            translated = True
+                            live_translate_count += 1
+                            # Cache the new translation back to DB
+                            translations[user_language] = translated_text
+                            try:
+                                await classroom_db.update_message_translations(
+                                    rec.id, translations
+                                )
+                            except Exception as db_err:
+                                logger.warning(
+                                    f"[CLASSROOM] Failed to cache translation for msg {rec.id}: {db_err}"
+                                )
+                    except Exception as tr_err:
+                        logger.warning(
+                            f"[CLASSROOM] Live translation failed for msg {rec.id}: {tr_err}"
+                        )
 
             messages.append({
                 "id": rec.id,
@@ -1166,6 +1200,12 @@ class RoomManager:
                 "timestamp": rec.timestamp,
                 "reaction_counts": json.loads(rec.reaction_counts) if rec.reaction_counts else {},
             })
+
+        if live_translate_count > 0:
+            logger.info(
+                f"[CLASSROOM] Live-translated {live_translate_count}/{len(records)} messages "
+                f"to '{user_language}' for room {room_id} on join"
+            )
 
         return messages
 
@@ -1583,17 +1623,21 @@ class RoomManager:
             return
 
         # Determine if there is an *active* speaker (connected user with the token).
-        # A speaker_id pointing to a disconnected user (in grace period) does NOT
-        # count as an active speaker — new joiners should be able to get the token.
         active_speaker = (
             room.speaker_id is not None and room.speaker_id in room.users
         )
 
-        # If this is the teacher joining and no one is actively speaking, give them the token
-        if user_id == room.teacher_id and not active_speaker:
+        # If a speaker recently disconnected and is in the grace period,
+        # do NOT auto-assign the token to anyone — the original speaker
+        # may reconnect within 30s and reclaim it.
+        grace_active = room._grace_speaker_id is not None
+
+        # If this is the teacher joining and no one is actively speaking
+        # (and no grace period is active), give them the token
+        if user_id == room.teacher_id and not active_speaker and not grace_active:
             await self._assign_token(room, user_id)
         # If first user, auto-assign speaker token
-        elif len(room.users) == 1 and not active_speaker:
+        elif len(room.users) == 1 and not active_speaker and not grace_active:
             await self._assign_token(room, user_id)
 
     async def remove_user(self, room_id: str, user_id: str):
@@ -2265,13 +2309,33 @@ router = APIRouter(prefix="/classroom", tags=["classroom"])
 
 
 def _get_request_actor(request: Request) -> dict:
-    """Extract caller identity from headers set by the frontend."""
-    user_id = (
+    """Extract caller identity from JWT (if AUTH_ENABLED) or headers.
+
+    When WEBUI_SECRET_KEY is set:
+      - Authorization: Bearer <jwt> is REQUIRED
+      - user_id is extracted from the verified JWT payload ("id" claim)
+      - name / email / role still come from headers (supplementary display info)
+
+    When WEBUI_SECRET_KEY is NOT set (dev/test):
+      - Falls back to x-user-id / x-user-name / x-user-role headers
+    """
+    jwt_user_id = None
+
+    if AUTH_ENABLED:
+        auth_header = request.headers.get("authorization")
+        jwt_user_id = get_verified_user_id(auth_header)
+        if not jwt_user_id:
+            raise HTTPException(status_code=401, detail="Valid JWT required (WEBUI_SECRET_KEY is set)")
+
+    # user_id: prefer JWT-verified ID, fall back to headers in dev mode
+    user_id = jwt_user_id or (
         request.headers.get("x-user-id")
         or request.headers.get("x-openwebui-user-id")
         or request.query_params.get("user_id")
         or ""
     ).strip()
+
+    # Supplementary identity info (from headers — not verified, display only)
     user_name = (
         request.headers.get("x-user-name")
         or request.headers.get("x-openwebui-user-name")
@@ -2298,6 +2362,14 @@ def _get_request_actor(request: Request) -> dict:
         "role": role,
         "is_admin": role == "admin",
     }
+
+
+async def _require_authenticated(request: Request) -> dict:
+    """Require any authenticated user (JWT when AUTH_ENABLED, headers in dev)."""
+    actor = _get_request_actor(request)
+    if not actor["user_id"]:
+        raise HTTPException(status_code=401, detail="Missing user identity")
+    return actor
 
 
 async def _require_admin(request: Request) -> dict:
@@ -2433,14 +2505,16 @@ async def create_room(
 
 
 @router.get("/rooms")
-async def list_rooms():
+async def list_rooms(request: Request):
     """List all active classroom rooms."""
+    await _require_authenticated(request)
     return {"rooms": room_manager.list_rooms()}
 
 
 @router.get("/rooms/{room_id}")
-async def get_room(room_id: str):
+async def get_room(room_id: str, request: Request):
     """Get room details."""
+    await _require_authenticated(request)
     room = room_manager.get_room(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -2472,7 +2546,7 @@ async def delete_room(room_id: str, request: Request):
 
 
 @router.post("/rooms/{room_id}/token")
-async def manage_token(room_id: str, action: str = "request", user_id: str = "", to_user_id: str = ""):
+async def manage_token(room_id: str, request: Request, action: str = "request", user_id: str = "", to_user_id: str = ""):
     """
     Manage speaker token.
 
@@ -2481,6 +2555,7 @@ async def manage_token(room_id: str, action: str = "request", user_id: str = "",
         pass    — pass token to to_user_id (or next in queue)
         release — release token
     """
+    await _require_authenticated(request)
     room = room_manager.get_room(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -2501,15 +2576,17 @@ async def manage_token(room_id: str, action: str = "request", user_id: str = "",
 # ── Session History Endpoints ──
 
 @router.get("/sessions")
-async def list_sessions(room_id: str = None, limit: int = 50, offset: int = 0):
+async def list_sessions(request: Request, room_id: str = None, limit: int = 50, offset: int = 0):
     """List past classroom sessions."""
+    await _require_authenticated(request)
     sessions = await classroom_db.list_sessions(room_id=room_id, limit=limit, offset=offset)
     return {"sessions": [s.to_dict() for s in sessions]}
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, request: Request):
     """Get a specific session with its messages."""
+    await _require_authenticated(request)
     session = await classroom_db.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2521,8 +2598,9 @@ async def get_session(session_id: str):
 
 
 @router.get("/sessions/{session_id}/summary")
-async def get_session_summary(session_id: str):
+async def get_session_summary(session_id: str, request: Request):
     """Get or generate session summary + quiz."""
+    await _require_authenticated(request)
     session = await classroom_db.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2549,8 +2627,9 @@ async def get_session_summary(session_id: str):
 
 
 @router.get("/dashboard")
-async def get_dashboard(room_id: str = None):
+async def get_dashboard(request: Request, room_id: str = None):
     """Teacher dashboard stats."""
+    await _require_authenticated(request)
     stats = await classroom_db.get_dashboard_stats(room_id=room_id)
     return stats
 
@@ -2558,15 +2637,17 @@ async def get_dashboard(room_id: str = None):
 # ── User Profile Endpoints ──
 
 @router.get("/users")
-async def list_users():
+async def list_users(request: Request):
     """List all known user profiles."""
+    await _require_authenticated(request)
     profiles = await classroom_db.list_user_profiles()
     return {"users": [p.to_dict() for p in profiles]}
 
 
 @router.get("/users/{user_id}")
-async def get_user(user_id: str):
+async def get_user(user_id: str, request: Request):
     """Get a user profile."""
+    await _require_authenticated(request)
     profile = await classroom_db.get_user_profile(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
@@ -2579,9 +2660,10 @@ async def get_user(user_id: str):
 
 
 @router.put("/users/{user_id}")
-async def update_user(user_id: str, display_name: str = None,
+async def update_user(user_id: str, request: Request, display_name: str = None,
                       preferred_language: str = None, role: str = None):
     """Update a user profile."""
+    await _require_authenticated(request)
     profile = await classroom_db.get_user_profile(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
@@ -2601,9 +2683,10 @@ async def update_user(user_id: str, display_name: str = None,
 
 
 @router.post("/users")
-async def create_user(user_id: str, display_name: str, preferred_language: str = "en",
-                      role: str = "student"):
+async def create_user(user_id: str, request: Request, display_name: str = "",
+                      preferred_language: str = "en", role: str = "student"):
     """Create or update a user profile."""
+    await _require_authenticated(request)
     normalized_language = _normalize_classroom_language(preferred_language)
     if not normalized_language:
         raise HTTPException(status_code=400, detail="Unsupported preferred_language. Allowed: en, hi, ta")
@@ -2619,12 +2702,13 @@ async def create_user(user_id: str, display_name: str, preferred_language: str =
 # ── Room Update Endpoint ──
 
 @router.put("/rooms/{room_id}")
-async def update_room(room_id: str, name: str = None, topic: str = None,
+async def update_room(room_id: str, request: Request, name: str = None, topic: str = None,
                       teacher_id: str = None, is_permanent: bool = None,
                       room_type: str = None,
                       curriculum_chapter_id: str = None,
                       curriculum_section_id: str = None):
     """Update room configuration."""
+    await _require_teacher_or_admin(request)
     room = room_manager.get_room(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -2678,19 +2762,21 @@ async def update_room(room_id: str, name: str = None, topic: str = None,
 # ── Curriculum Endpoints ──
 
 @router.get("/curriculum/files")
-async def list_curriculum_files():
+async def list_curriculum_files(request: Request):
     """List available curriculum files with metadata."""
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     return {"files": cm.list_files(), "available": cm.available}
 
 
 @router.get("/curriculum/topics")
-async def get_curriculum_topics(filename: str = None):
+async def get_curriculum_topics(request: Request, filename: str = None):
     """Get browseable chapter -> section -> concepts tree for the topic picker.
 
     Optional query param `filename` to filter to a single curriculum file.
     """
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     tree = cm.get_browseable_tree(filename)
@@ -2698,8 +2784,9 @@ async def get_curriculum_topics(filename: str = None):
 
 
 @router.get("/curriculum/search")
-async def search_curriculum_concepts(q: str, limit: int = 20):
+async def search_curriculum_concepts(request: Request, q: str, limit: int = 20):
     """Search concepts by name (case-insensitive substring match)."""
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     results = cm.search_concepts(q, limit=limit)
@@ -2707,8 +2794,9 @@ async def search_curriculum_concepts(q: str, limit: int = 20):
 
 
 @router.get("/curriculum/concept/{concept_name}")
-async def get_curriculum_concept(concept_name: str):
+async def get_curriculum_concept(concept_name: str, request: Request):
     """Get full concept detail from the concept registry."""
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     detail = cm.get_concept_detail(concept_name)
@@ -2718,8 +2806,9 @@ async def get_curriculum_concept(concept_name: str):
 
 
 @router.get("/curriculum/context/{topic}")
-async def get_curriculum_context(topic: str, max_tokens: int = None, language: str = "english"):
+async def get_curriculum_context(topic: str, request: Request, max_tokens: int = None, language: str = "english"):
     """Preview the curriculum context block that would be injected for a topic."""
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     ctx = cm.get_context_for_topic(topic, max_tokens=max_tokens, language=language)
@@ -2729,8 +2818,9 @@ async def get_curriculum_context(topic: str, max_tokens: int = None, language: s
 
 
 @router.get("/curriculum/section/{section_id}")
-async def get_curriculum_section_info(section_id: str):
+async def get_curriculum_section_info(section_id: str, request: Request):
     """Get section info (title, chapter title, concepts) for display."""
+    await _require_authenticated(request)
     from curriculum_manager import get_curriculum_manager
     cm = get_curriculum_manager()
     info = cm.get_section_info(section_id)
@@ -2742,8 +2832,9 @@ async def get_curriculum_section_info(section_id: str):
 # ── Room Members Endpoint ──
 
 @router.get("/rooms/{room_id}/members")
-async def get_room_members(room_id: str):
+async def get_room_members(room_id: str, request: Request):
     """Get persisted members of a room (includes offline users)."""
+    await _require_authenticated(request)
     room = room_manager.get_room(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -2798,7 +2889,25 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             await websocket.close()
             return
 
-        user_id = data.get("user_id", str(uuid.uuid4())[:8])
+        # ── JWT verification for WebSocket join ──
+        # When AUTH_ENABLED, the join message must include a "token" field
+        # containing a valid OpenWebUI JWT.  The user_id is extracted from
+        # the verified JWT; any user_id in the message body is ignored.
+        if AUTH_ENABLED:
+            ws_token = data.get("token")
+            if not ws_token:
+                await websocket.send_json({"type": "error", "message": "JWT token required in join message"})
+                await websocket.close()
+                return
+            jwt_payload = decode_openwebui_jwt(ws_token)
+            if not jwt_payload or "id" not in jwt_payload:
+                await websocket.send_json({"type": "error", "message": "Invalid or expired JWT token"})
+                await websocket.close()
+                return
+            user_id = jwt_payload["id"]
+            logger.info(f"[CLASSROOM] WS join authenticated via JWT: user_id={user_id}")
+        else:
+            user_id = data.get("user_id", str(uuid.uuid4())[:8])
         language = _normalize_classroom_language(data.get("language", "en"))
         if not language:
             await websocket.send_json({

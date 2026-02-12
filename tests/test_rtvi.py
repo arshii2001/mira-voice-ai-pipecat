@@ -43,7 +43,7 @@ import pipecat.frames.protobufs.frames_pb2 as frame_protos
 # Config
 # ─────────────────────────────────────────────────
 WS_URL = os.getenv("PIPECAT_WS_URL", "ws://mira-voice:7860/ws")
-AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/test_audio")  # Pre-recorded WAV files
+AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/tests/test_audio")  # Pre-recorded WAV files
 SAMPLE_RATE = 16000
 NUM_CHANNELS = 1
 CHUNK_DURATION_MS = 100  # Send 100ms audio chunks (like a real client)
@@ -199,7 +199,7 @@ class RTVITestClient:
         self.received_messages = []
         self._receive_task = None
 
-    async def connect(self, timeout: float = 10.0):
+    async def connect(self, timeout: float = 10.0, enable_greeting: bool = True):
         """Connect to Pipecat server via WebSocket."""
         logger.info(f"Connecting to {self.ws_url}")
         self.ws = await asyncio.wait_for(
@@ -207,6 +207,12 @@ class RTVITestClient:
             timeout=timeout,
         )
         logger.info("✅ Connected")
+
+        # Send initial config message — include language "hi" so STT hints
+        # allow Hindi (our test WAVs contain Hindi speech).
+        config_msg = {"type": "config", "enable_greeting": enable_greeting, "language": "hi"}
+        await self.ws.send(json.dumps(config_msg))
+        logger.info(f"Sent config (enable_greeting={enable_greeting}, language=hi)")
 
     async def disconnect(self):
         if self.ws:

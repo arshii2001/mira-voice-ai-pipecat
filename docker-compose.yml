@@ -31,6 +31,8 @@ services:
       - LOG_LEVEL=DEBUG
       - CURRICULUM_DIR=/content/curriculum
       - CURRICULUM_CONTEXT_MAX_TOKENS=600
+      # Shared JWT secret with OpenWebUI — enables JWT auth on classroom endpoints
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
     volumes:
       - ./prompts:/app/prompts:ro
       - classroom-data:/app/data
@@ -70,6 +72,8 @@ services:
       - WEBUI_AUTH=true
       - ENABLE_SIGNUP=false
       - ENABLE_INITIAL_ADMIN_SIGNUP=true
+      # Shared JWT secret with Pipecat — must match WEBUI_SECRET_KEY above
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
       
       # Use OpenAI for text chat
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}

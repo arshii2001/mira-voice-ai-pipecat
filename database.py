@@ -567,6 +567,14 @@ class ClassroomDB:
             rows = await cursor.fetchall()
             return [MessageRecord(**dict(row)) for row in reversed(rows)]
 
+    async def update_message_translations(self, message_id: str, translations: dict):
+        """Update the translations JSON for a message (used to backfill on join)."""
+        await self._db.execute(
+            "UPDATE messages SET translations = ? WHERE id = ?",
+            (json.dumps(translations), message_id),
+        )
+        await self._db.commit()
+
     # ── Hand Raises ───────────────────────────────────────────────
 
     async def create_hand_raise(

@@ -151,6 +151,12 @@ spec:
                 configMapKeyRef:
                   name: pipecat-v2-config
                   key: CURRICULUM_CONTEXT_MAX_TOKENS
+            # Shared JWT secret with OpenWebUI — enables JWT auth on classroom endpoints
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-shared-secrets
+                  key: WEBUI_SECRET_KEY
           volumeMounts:
             - name: curriculum-data
               mountPath: /content/curriculum
@@ -295,6 +301,12 @@ spec:
                 configMapKeyRef:
                   name: openwebui-v2-config
                   key: ENABLE_PERSISTENT_CONFIG
+            # Shared JWT secret with Pipecat — must match WEBUI_SECRET_KEY above
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-shared-secrets
+                  key: WEBUI_SECRET_KEY
             - name: DATA_DIR
               value: /app/backend/data
           volumeMounts:
