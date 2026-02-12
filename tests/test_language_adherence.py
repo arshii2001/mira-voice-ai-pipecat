@@ -65,6 +65,8 @@ from classroom import RoomManager
 # ─────────────────────────────────────────────────
 HTTP_URL = os.getenv("PIPECAT_HTTP_URL", "http://mira-voice:7860")
 CLASSROOM_WS_BASE = os.getenv("CLASSROOM_WS_URL", "ws://mira-voice:7860/classroom/rooms")
+TEST_ADMIN_ID = os.getenv("TEST_ADMIN_ID", "test-admin")
+TEST_ADMIN_NAME = os.getenv("TEST_ADMIN_NAME", "Test Admin")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +74,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("test_language")
+_APPROVED_TEACHERS: set[str] = set()
 
 
 # ─────────────────────────────────────────────────
@@ -86,17 +89,92 @@ class TestResult:
     error: str = ""
 
 
-async def api_create_room(name: str, room_type: str = "teacher_driven") -> dict:
-    params = {"name": name, "room_type": room_type}
+def _auth_headers(user_id: str, user_name: str, role: str = "user") -> dict:
+    return {
+        "x-user-id": user_id,
+        "x-user-name": user_name,
+        "x-user-email": f"{user_id}@example.test",
+        "x-user-role": role,
+    }
+
+
+async def ensure_teacher_role(user_id: str, user_name: str) -> None:
+    if user_id in _APPROVED_TEACHERS:
+        return
+
+    user_headers = _auth_headers(user_id, user_name, role="user")
+    admin_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(f"{HTTP_URL}/classroom/rooms", params=params) as resp:
+        # Fast path when already approved.
+        async with session.get(f"{HTTP_URL}/classroom/teacher-status", headers=user_headers) as resp:
+            assert resp.status == 200, f"teacher-status failed: {resp.status}"
+            payload = await resp.json()
+            if payload.get("is_teacher"):
+                _APPROVED_TEACHERS.add(user_id)
+                return
+
+        request_id = None
+        async with session.post(
+            f"{HTTP_URL}/classroom/teacher-requests",
+            params={"purpose": "Automated test teacher approval"},
+            headers=user_headers,
+        ) as resp:
+            if resp.status == 200:
+                payload = await resp.json()
+                request_id = payload.get("id")
+            else:
+                # Could already be pending/reviewed from prior test run.
+                assert resp.status in (400, 409), f"teacher-request failed: {resp.status}"
+
+        if not request_id:
+            async with session.get(
+                f"{HTTP_URL}/classroom/teacher-requests",
+                params={"status": "pending", "limit": 200},
+                headers=admin_headers,
+            ) as resp:
+                assert resp.status == 200, f"list teacher-requests failed: {resp.status}"
+                pending = await resp.json()
+                for req in pending.get("requests", []):
+                    if req.get("user_id") == user_id:
+                        request_id = req.get("id")
+                        break
+
+        if request_id:
+            async with session.post(
+                f"{HTTP_URL}/classroom/teacher-requests/{request_id}/approve",
+                params={"note": "Approved for automated tests"},
+                headers=admin_headers,
+            ) as resp:
+                assert resp.status == 200, f"approve teacher-request failed: {resp.status}"
+
+        async with session.get(f"{HTTP_URL}/classroom/teacher-status", headers=user_headers) as resp:
+            assert resp.status == 200, f"teacher-status recheck failed: {resp.status}"
+            payload = await resp.json()
+            assert payload.get("is_teacher") is True, "teacher role was not approved"
+
+    _APPROVED_TEACHERS.add(user_id)
+
+
+async def api_create_room(
+    name: str,
+    room_type: str = "teacher_driven",
+    creator_user_id: str = "teacher-01",
+    creator_name: str = "Teacher",
+) -> dict:
+    await ensure_teacher_role(creator_user_id, creator_name)
+    params = {"name": name, "room_type": room_type}
+    headers = _auth_headers(creator_user_id, creator_name, role="user")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{HTTP_URL}/classroom/rooms", params=params, headers=headers) as resp:
             assert resp.status == 200, f"Create room failed: {resp.status}"
             return await resp.json()
 
 
 async def api_delete_room(room_id: str):
+    admin_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
     async with aiohttp.ClientSession() as session:
-        async with session.delete(f"{HTTP_URL}/classroom/rooms/{room_id}") as resp:
+        async with session.delete(f"{HTTP_URL}/classroom/rooms/{room_id}", headers=admin_headers) as resp:
             pass  # Best effort
 
 
@@ -296,7 +374,11 @@ async def test_teacher_action_english() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Teacher Action")
+        room = await api_create_room(
+            "Lang Test - Teacher Action",
+            creator_user_id="teacher-lang-1",
+            creator_name="TeacherEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -334,7 +416,11 @@ async def test_english_after_hindi_history() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - EN after HI")
+        room = await api_create_room(
+            "Lang Test - EN after HI",
+            creator_user_id="teacher-lang-2",
+            creator_name="PrasadEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -380,7 +466,11 @@ async def test_hindi_question_stays_hindi() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Hindi Q")
+        room = await api_create_room(
+            "Lang Test - Hindi Q",
+            creator_user_id="student-hi-1",
+            creator_name="RaviHi",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -415,7 +505,11 @@ async def test_mixed_history_no_drift() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Mixed History")
+        room = await api_create_room(
+            "Lang Test - Mixed History",
+            creator_user_id="teacher-lang-3",
+            creator_name="TeacherMixed",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -458,7 +552,11 @@ async def test_listener_gets_translation() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Listener Translation")
+        room = await api_create_room(
+            "Lang Test - Listener Translation",
+            creator_user_id="teacher-lang-4",
+            creator_name="TeacherEn",
+        )
         room_id = room["room_id"]
 
         # Teacher (English speaker)
@@ -555,7 +653,11 @@ async def test_tell_me_more_stays_english() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Tell Me More")
+        room = await api_create_room(
+            "Lang Test - Tell Me More",
+            creator_user_id="teacher-lang-5",
+            creator_name="PrasadEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -601,7 +703,11 @@ async def test_set_topic_then_english_q() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Topic Then Q")
+        room = await api_create_room(
+            "Lang Test - Topic Then Q",
+            creator_user_id="teacher-lang-6",
+            creator_name="TeacherEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -643,7 +749,11 @@ async def test_math_question_english() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Math EN")
+        room = await api_create_room(
+            "Lang Test - Math EN",
+            creator_user_id="teacher-lang-7",
+            creator_name="TeacherEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -679,7 +789,11 @@ async def test_multi_turn_language_stability() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Multi Turn")
+        room = await api_create_room(
+            "Lang Test - Multi Turn",
+            creator_user_id="teacher-lang-8",
+            creator_name="TeacherEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -735,7 +849,12 @@ async def test_discussion_room_english() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Discussion EN", room_type="discussion")
+        room = await api_create_room(
+            "Lang Test - Discussion EN",
+            room_type="discussion",
+            creator_user_id="disc-en-1",
+            creator_name="StudentEn",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -768,7 +887,12 @@ async def test_discussion_room_hindi() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Discussion HI", room_type="discussion")
+        room = await api_create_room(
+            "Lang Test - Discussion HI",
+            room_type="discussion",
+            creator_user_id="disc-hi-1",
+            creator_name="StudentHi",
+        )
         room_id = room["room_id"]
 
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
@@ -805,7 +929,12 @@ async def test_discussion_room_multi_student_lang() -> TestResult:
     t0 = time.time()
     room_id = None
     try:
-        room = await api_create_room("Lang Test - Discussion Multi", room_type="discussion")
+        room = await api_create_room(
+            "Lang Test - Discussion Multi",
+            room_type="discussion",
+            creator_user_id="disc-multi-en",
+            creator_name="StudentA_EN",
+        )
         room_id = room["room_id"]
 
         # Student A (English)

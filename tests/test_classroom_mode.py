@@ -76,6 +76,8 @@ CLASSROOM_WS_BASE = os.getenv("CLASSROOM_WS_URL", "ws://mira-voice:7860/classroo
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/tests/test_audio")
 SAMPLE_RATE = 16000
 CHUNK_DURATION_MS = 100
+TEST_ADMIN_ID = os.getenv("TEST_ADMIN_ID", "test-admin")
+TEST_ADMIN_NAME = os.getenv("TEST_ADMIN_NAME", "Test Admin")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +85,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("classroom-test")
+_APPROVED_TEACHERS: set[str] = set()
 
 
 def _is_remote_mode() -> bool:
@@ -124,9 +127,85 @@ def chunk_audio(pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> List[bytes]
 # ─────────────────────────────────────────────────
 # Test helpers
 # ─────────────────────────────────────────────────
-async def api_create_room(name: str = "Classroom") -> dict:
+def _auth_headers(user_id: str, user_name: str, role: str = "user") -> dict:
+    return {
+        "x-user-id": user_id,
+        "x-user-name": user_name,
+        "x-user-email": f"{user_id}@example.test",
+        "x-user-role": role,
+    }
+
+
+async def ensure_teacher_role(user_id: str, user_name: str) -> None:
+    if user_id in _APPROVED_TEACHERS:
+        return
+
+    user_headers = _auth_headers(user_id, user_name, role="user")
+    admin_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
+
     async with aiohttp.ClientSession() as session:
-        async with session.post(f"{HTTP_URL}/classroom/rooms", params={"name": name}) as resp:
+        # Fast path when already approved.
+        async with session.get(f"{HTTP_URL}/classroom/teacher-status", headers=user_headers) as resp:
+            assert resp.status == 200, f"teacher-status failed: {resp.status}"
+            payload = await resp.json()
+            if payload.get("is_teacher"):
+                _APPROVED_TEACHERS.add(user_id)
+                return
+
+        request_id = None
+        async with session.post(
+            f"{HTTP_URL}/classroom/teacher-requests",
+            params={"purpose": "Automated test teacher approval"},
+            headers=user_headers,
+        ) as resp:
+            if resp.status == 200:
+                payload = await resp.json()
+                request_id = payload.get("id")
+            else:
+                assert resp.status in (400, 409), f"teacher-request failed: {resp.status}"
+
+        if not request_id:
+            async with session.get(
+                f"{HTTP_URL}/classroom/teacher-requests",
+                params={"status": "pending", "limit": 200},
+                headers=admin_headers,
+            ) as resp:
+                assert resp.status == 200, f"list teacher-requests failed: {resp.status}"
+                pending = await resp.json()
+                for req in pending.get("requests", []):
+                    if req.get("user_id") == user_id:
+                        request_id = req.get("id")
+                        break
+
+        if request_id:
+            async with session.post(
+                f"{HTTP_URL}/classroom/teacher-requests/{request_id}/approve",
+                params={"note": "Approved for automated tests"},
+                headers=admin_headers,
+            ) as resp:
+                assert resp.status == 200, f"approve teacher-request failed: {resp.status}"
+
+        async with session.get(f"{HTTP_URL}/classroom/teacher-status", headers=user_headers) as resp:
+            assert resp.status == 200, f"teacher-status recheck failed: {resp.status}"
+            payload = await resp.json()
+            assert payload.get("is_teacher") is True, "teacher role was not approved"
+
+    _APPROVED_TEACHERS.add(user_id)
+
+
+async def api_create_room(
+    name: str = "Classroom",
+    creator_user_id: str = "teacher-01",
+    creator_name: str = "Teacher",
+) -> dict:
+    await ensure_teacher_role(creator_user_id, creator_name)
+    headers = _auth_headers(creator_user_id, creator_name, role="user")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{HTTP_URL}/classroom/rooms",
+            params={"name": name},
+            headers=headers,
+        ) as resp:
             assert resp.status == 200, f"Create room failed: {resp.status}"
             return await resp.json()
 
@@ -144,8 +223,9 @@ async def api_get_room(room_id: str) -> dict:
 
 
 async def api_delete_room(room_id: str) -> dict:
+    admin_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
     async with aiohttp.ClientSession() as session:
-        async with session.delete(f"{HTTP_URL}/classroom/rooms/{room_id}") as resp:
+        async with session.delete(f"{HTTP_URL}/classroom/rooms/{room_id}", headers=admin_headers) as resp:
             return await resp.json()
 
 
@@ -1622,7 +1702,11 @@ async def test_action_tag_filter_teacher_action() -> TestResult:
     Verify the response introduces the topic but does NOT echo raw command tags."""
     t0 = time.time()
     try:
-        room = await api_create_room("TagFilter Action")
+        room = await api_create_room(
+            "TagFilter Action",
+            creator_user_id="teacher-tag2",
+            creator_name="Teacher",
+        )
         room_id = room["room_id"]
 
         ws_teacher = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
