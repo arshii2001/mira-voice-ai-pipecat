@@ -1,19 +1,19 @@
 """
 Standalone TTS service for classroom audio.
 
-Uses ElevenLabs REST API (not Pipecat's WebSocket-based service) so it works
-outside a Pipecat pipeline. Returns raw PCM 16-bit LE audio chunks.
+This module keeps classroom listener audio provider-agnostic so the same
+`TTS_PROVIDER` env var can drive both tutor voice and classroom fanout.
 """
 
 import asyncio
-import io
 import logging
 import os
-import struct
 from dataclasses import dataclass
 from typing import AsyncGenerator, Optional
 
 import aiohttp
+
+from services.svara_tts import SvaraTTSService
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class AudioChunk:
     sample_rate: int = 24000
 
 
-class ClassroomTTS:
+class ElevenLabsClassroomTTS:
     """
     Standalone ElevenLabs TTS for classroom listeners.
 
@@ -55,7 +55,10 @@ class ClassroomTTS:
         self._model = model
         self._sample_rate = sample_rate
         self._session: Optional[aiohttp.ClientSession] = None
-        logger.info(f"ClassroomTTS initialized: voice={self._voice_id}, model={model}, sr={sample_rate}")
+        logger.info(
+            f"ClassroomTTS initialized: provider=elevenlabs, voice={self._voice_id}, "
+            f"model={model}, sr={sample_rate}"
+        )
 
     async def _ensure_session(self):
         if not self._session or self._session.closed:
@@ -124,22 +127,90 @@ class ClassroomTTS:
                     yield AudioChunk(audio=buffer, sample_rate=self._sample_rate)
 
         except asyncio.CancelledError:
-            logger.info("ClassroomTTS cancelled")
+            logger.info("ClassroomTTS (ElevenLabs) cancelled")
             raise
         except Exception as e:
-            logger.error(f"ClassroomTTS error: {e}")
+            logger.error(f"ClassroomTTS (ElevenLabs) error: {e}")
 
 
-def create_classroom_tts(sample_rate: int = 24000) -> Optional[ClassroomTTS]:
-    """Factory function to create a ClassroomTTS instance from env vars."""
-    api_key = os.getenv("ELEVENLABS_API_KEY", "")
-    if not api_key:
-        logger.warning("ELEVENLABS_API_KEY not set — classroom audio disabled")
-        return None
+class SvaraClassroomTTS:
+    """Classroom TTS adapter backed by SvaraTTSService."""
 
-    voice_gender = os.getenv("TTS_VOICE_GENDER", "female")
-    return ClassroomTTS(
-        api_key=api_key,
-        voice_gender=voice_gender,
-        sample_rate=sample_rate,
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        voice: str = "en_female",
+        sample_rate: int = 24000,
+    ):
+        self._sample_rate = sample_rate
+        self._service = SvaraTTSService(
+            base_url=base_url,
+            api_key=api_key or None,
+            voice=voice,
+            streaming=True,
+            sample_rate=sample_rate,
+        )
+        logger.info(
+            f"ClassroomTTS initialized: provider=svara, base_url={base_url}, "
+            f"voice={voice}, sr={sample_rate}"
+        )
+
+    async def run_tts(self, text: str) -> AsyncGenerator[AudioChunk, None]:
+        """Synthesize text via Svara and yield normalized AudioChunk objects."""
+        if not text.strip():
+            return
+
+        try:
+            async for frame in self._service.run_tts(text):
+                if hasattr(frame, "audio") and frame.audio:
+                    yield AudioChunk(
+                        audio=frame.audio,
+                        sample_rate=getattr(frame, "sample_rate", self._sample_rate),
+                    )
+        except asyncio.CancelledError:
+            logger.info("ClassroomTTS (Svara) cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"ClassroomTTS (Svara) error: {e}")
+
+
+def create_classroom_tts(sample_rate: int = 24000):
+    """Factory function to create classroom TTS using TTS_PROVIDER env vars."""
+    provider = os.getenv("TTS_PROVIDER", "elevenlabs").strip().lower()
+
+    if provider == "elevenlabs":
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            logger.warning("ELEVENLABS_API_KEY not set — classroom audio disabled")
+            return None
+
+        voice_gender = os.getenv("TTS_VOICE_GENDER", "female")
+        return ElevenLabsClassroomTTS(
+            api_key=api_key,
+            voice_gender=voice_gender,
+            sample_rate=sample_rate,
+        )
+
+    if provider == "svara":
+        tts_ws_url = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
+        tts_base_url = (
+            tts_ws_url
+            .replace("ws://", "http://")
+            .replace("wss://", "https://")
+            .rsplit("/v1/", 1)[0]
+        )
+        tts_api_key = os.getenv("TTS_WS_API_KEY", "")
+        default_voice = os.getenv("DEFAULT_VOICE", "en_female")
+        return SvaraClassroomTTS(
+            base_url=tts_base_url,
+            api_key=tts_api_key,
+            voice=default_voice,
+            sample_rate=sample_rate,
+        )
+
+    logger.warning(
+        f"Unsupported TTS_PROVIDER='{provider}' for classroom audio "
+        f"(supported: elevenlabs, svara) — classroom audio disabled"
     )
+    return None

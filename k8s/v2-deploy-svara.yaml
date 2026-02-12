@@ -1,0 +1,406 @@
+# ============================================================
+# Mira v2.0 Deployment - Pipecat + OpenWebUI (SVARA profile)
+# Namespace: openwebui
+# Images: iaienterpriseacr.azurecr.io/audio:mira-voice-v2.0
+#         iaienterpriseacr.azurecr.io/audio:mira-openwebui-v2.0
+# ============================================================
+
+---
+# ── Pipecat v2 ConfigMap (non-sensitive overrides) ───────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipecat-v2-config
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+data:
+  STT_PROVIDER: "soniox"
+  STT_LANGUAGE_HINTS: "en,hi,ta,kn"
+  TTS_PROVIDER: "svara"
+  TTS_WS_URL: "wss://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream"
+  TTS_VOICE_GENDER: "female"
+  DEFAULT_VOICE: "en_female"
+  LLM_PROVIDER: "openai"
+  LLM_BASE_URL: "https://api.openai.com/v1"
+  LLM_MODEL: "gpt-4o-mini"
+  HOST: "0.0.0.0"
+  PORT: "7860"
+  LOG_LEVEL: "INFO"
+  PROMPT_VERSION: "v3"
+  CURRICULUM_DIR: "/content/curriculum"
+  CURRICULUM_CONTEXT_MAX_TOKENS: "600"
+
+---
+# ── OpenWebUI v2 ConfigMap ───────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openwebui-v2-config
+  namespace: openwebui
+  labels:
+    app: openwebui-v2
+data:
+  PIPECAT_ENABLED: "true"
+  PIPECAT_API_URL: "https://pipecat-v2-api.taile994c5.ts.net"
+  PIPECAT_CONNECTION_MODE: "websocket"
+  WEBUI_AUTH: "true"
+  ENABLE_SIGNUP: "true"
+  ENABLE_PERSISTENT_CONFIG: "false"
+
+---
+# ── OpenWebUI v2 PVC ────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openwebui-v2-data-pvc
+  namespace: openwebui
+  labels:
+    app: openwebui-v2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ── Pipecat v2 Deployment ───────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pipecat-v2
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pipecat-v2
+  template:
+    metadata:
+      labels:
+        app: pipecat-v2
+    spec:
+      imagePullSecrets:
+        - name: acr-iaienterpriseacr
+      containers:
+        - name: pipecat-v2
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v2.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7860
+              name: http
+              protocol: TCP
+          env:
+            - name: STT_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: STT_PROVIDER
+            - name: STT_LANGUAGE_HINTS
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: STT_LANGUAGE_HINTS
+            - name: TTS_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: TTS_PROVIDER
+            - name: TTS_WS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: TTS_WS_URL
+            - name: TTS_VOICE_GENDER
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: TTS_VOICE_GENDER
+            - name: DEFAULT_VOICE
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: DEFAULT_VOICE
+            - name: LLM_PROVIDER
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: LLM_PROVIDER
+            - name: LLM_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: LLM_BASE_URL
+            - name: LLM_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: LLM_MODEL
+            - name: HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: HOST
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: PORT
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: LOG_LEVEL
+            - name: PROMPT_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: PROMPT_VERSION
+            - name: CURRICULUM_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: CURRICULUM_DIR
+            - name: CURRICULUM_CONTEXT_MAX_TOKENS
+              valueFrom:
+                configMapKeyRef:
+                  name: pipecat-v2-config
+                  key: CURRICULUM_CONTEXT_MAX_TOKENS
+            - name: SONIOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-voice-secrets-svara
+                  key: SONIOX_API_KEY
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-voice-secrets-svara
+                  key: LLM_API_KEY
+            - name: ELEVENLABS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-voice-secrets-svara
+                  key: ELEVENLABS_API_KEY
+                  optional: true
+            - name: TTS_WS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mira-voice-secrets-svara
+                  key: TTS_WS_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: curriculum-data
+              mountPath: /content/curriculum
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            tcpSocket:
+              port: 7860
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 7860
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: curriculum-data
+          persistentVolumeClaim:
+            claimName: curriculum-data-pvc
+
+---
+# ── Curriculum PVC ────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: curriculum-data-pvc
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# ── Pipecat v2 ClusterIP Service ────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: pipecat-v2-service
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+spec:
+  type: ClusterIP
+  selector:
+    app: pipecat-v2
+  ports:
+    - port: 7860
+      targetPort: 7860
+      protocol: TCP
+
+---
+# ── Pipecat v2 Tailscale Ingress (HTTPS with auto TLS) ──────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pipecat-v2-tailscale-ingress
+  namespace: openwebui
+  labels:
+    app: pipecat-v2
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: pipecat-v2-service
+      port:
+        number: 7860
+  tls:
+    - hosts:
+        - pipecat-v2-api
+
+---
+# ── OpenWebUI v2 Deployment ─────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openwebui-v2
+  namespace: openwebui
+  labels:
+    app: openwebui-v2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openwebui-v2
+  template:
+    metadata:
+      labels:
+        app: openwebui-v2
+    spec:
+      imagePullSecrets:
+        - name: acr-iaienterpriseacr
+      containers:
+        - name: openwebui-v2
+          image: iaienterpriseacr.azurecr.io/audio:mira-openwebui-v2.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: PIPECAT_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: PIPECAT_ENABLED
+            - name: PIPECAT_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: PIPECAT_API_URL
+            - name: PIPECAT_CONNECTION_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: PIPECAT_CONNECTION_MODE
+            - name: WEBUI_AUTH
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: WEBUI_AUTH
+            - name: ENABLE_SIGNUP
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: ENABLE_SIGNUP
+            - name: ENABLE_PERSISTENT_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: ENABLE_PERSISTENT_CONFIG
+            - name: DATA_DIR
+              value: /app/backend/data
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openwebui-v2-data-pvc
+
+---
+# ── OpenWebUI v2 ClusterIP Service ──────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: openwebui-v2-service
+  namespace: openwebui
+  labels:
+    app: openwebui-v2
+spec:
+  type: ClusterIP
+  selector:
+    app: openwebui-v2
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+
+---
+# ── OpenWebUI v2 Tailscale Ingress (HTTPS with auto TLS) ────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openwebui-v2-tailscale-ingress
+  namespace: openwebui
+  labels:
+    app: openwebui-v2
+spec:
+  ingressClassName: tailscale
+  defaultBackend:
+    service:
+      name: openwebui-v2-service
+      port:
+        number: 8080
+  tls:
+    - hosts:
+        - openwebui-v2

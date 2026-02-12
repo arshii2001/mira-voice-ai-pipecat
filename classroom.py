@@ -432,7 +432,7 @@ class RoomManager:
             from services.classroom_tts import create_classroom_tts
             self._tts = create_classroom_tts(sample_rate=24000)
             if self._tts:
-                logger.info("Classroom TTS initialized (ElevenLabs REST API)")
+                logger.info("Classroom TTS initialized (provider from TTS_PROVIDER)")
             else:
                 logger.warning("Classroom TTS not available — listeners will get text only")
         except Exception as e:

@@ -197,6 +197,19 @@ class SvaraTTSService(TTSService):
         """Return whether this service supports metrics generation."""
         return True
 
+    def _auth_headers(self) -> dict:
+        """Build auth headers for Svara gateways that expect different header names."""
+        key = (self._api_key or "").strip()
+        if not key:
+            return {}
+
+        bearer = key if key.lower().startswith("bearer ") else f"Bearer {key}"
+        return {
+            "Authorization": bearer,
+            "x-api-key": key,
+            "X-API-Key": key,
+        }
+
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         """
         Synthesize text to speech with barge-in support.
@@ -262,18 +275,28 @@ class SvaraTTSService(TTSService):
         """Run streaming TTS via WebSocket with interruption support."""
         ws_url = f"{self._ws_url}/v1/audio/text-to-speech/stream"
 
+        # Svara HTTP APIs use "prompt"; some WS deployments mirror that schema.
+        # Send both keys for compatibility across versions.
+        key = (self._api_key or "").strip()
+        bearer = key if key.lower().startswith("bearer ") else (f"Bearer {key}" if key else "")
         config = {
+            "type": "config",
+            "prompt": text,
             "text": text,
             "voice": self._config.voice,
             "temperature": self._config.temperature,
             "top_p": self._config.top_p,
             "max_tokens": self._config.max_tokens,
             "repetition_penalty": self._config.repetition_penalty,
+            # Some gateways validate auth from the first message payload.
+            "api_key": key,
+            "token": key,
+            "authorization": bearer,
         }
 
         try:
-            # Add Bearer auth header if API key is configured
-            extra_headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+            # Include both Bearer and x-api-key for gateway compatibility.
+            extra_headers = self._auth_headers()
             self._current_websocket = await websocket_connect(
                 ws_url,
                 max_size=10 * 1024 * 1024,
@@ -365,8 +388,7 @@ class SvaraTTSService(TTSService):
         }
 
         try:
-            # Add Bearer auth header if API key is configured
-            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+            headers = self._auth_headers()
             async with self._session.post(url, json=payload, headers=headers) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -408,8 +430,7 @@ class SvaraTTSService(TTSService):
         url = f"{self._base_url}/v1/audio/text-to-speech/voices"
 
         try:
-            # Add Bearer auth header if API key is configured
-            headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+            headers = self._auth_headers()
             async with self._session.get(url, headers=headers) as response:
                 if response.status != 200:
                     logger.error(f"Failed to list voices: HTTP {response.status}")
