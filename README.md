@@ -2,7 +2,7 @@
 
 Voice AI pipeline using Pipecat with Soniox STT and ElevenLabs/Svara TTS.
 
-Supports English, Hindi, Tamil, and Kannada.
+Supports English, Hindi, and Tamil.
 
 ## Quick Start
 

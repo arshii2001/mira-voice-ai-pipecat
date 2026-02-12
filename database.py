@@ -892,6 +892,17 @@ class ClassroomDB:
             rows = await cursor.fetchall()
             return [RoomMemberRecord(**dict(row)) for row in rows]
 
+    async def get_room_member(self, room_id: str, user_id: str) -> Optional[RoomMemberRecord]:
+        """Get a single room member record by room_id + user_id."""
+        async with self._db.execute(
+            "SELECT * FROM room_members WHERE room_id = ? AND user_id = ?",
+            (room_id, user_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return RoomMemberRecord(**dict(row))
+        return None
+
     async def get_user_rooms(self, user_id: str) -> List[RoomMemberRecord]:
         """Get all rooms a user belongs to."""
         async with self._db.execute(

@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -64,6 +65,40 @@ logger = logging.getLogger(__name__)
 
 # Regex to strip [TEACHER_ACTION: ...] / [TUTOR_ACTION: ...] tags from LLM output
 _ACTION_TAG_RE = re.compile(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*', re.IGNORECASE)
+_SUPPORTED_CLASSROOM_LANGUAGES = {"en", "hi", "ta"}
+
+
+def _normalize_classroom_language(lang: str) -> Optional[str]:
+    """Normalize user-provided language to one of en/hi/ta."""
+    if not lang:
+        return None
+    normalized = lang.strip().lower()
+    alias_map = {
+        "english": "en",
+        "hindi": "hi",
+        "tamil": "ta",
+    }
+    code = alias_map.get(normalized, normalized)
+    return code if code in _SUPPORTED_CLASSROOM_LANGUAGES else None
+
+
+def _response_language_instruction(lang_code: str) -> str:
+    """Hard instruction for assistant response language by speaker profile."""
+    code = _normalize_classroom_language(lang_code or "en") or "en"
+    if code == "hi":
+        return (
+            "CRITICAL RESPONSE LANGUAGE RULE: Reply only in Hindi (Devanagari script). "
+            "Do not use English except unavoidable technical terms."
+        )
+    if code == "ta":
+        return (
+            "CRITICAL RESPONSE LANGUAGE RULE: Reply only in Tamil script. "
+            "Do not use English except unavoidable technical terms."
+        )
+    return (
+        "CRITICAL RESPONSE LANGUAGE RULE: Reply only in English. "
+        "Do not use Hindi, Tamil, Urdu, Chinese, or any other language."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -321,7 +356,7 @@ class RoomUser:
     """A user connected to a classroom room."""
     user_id: str
     name: str
-    language: str  # preferred language code: en, hi, ta, kn
+    language: str  # preferred language code: en, hi, ta
     websocket: WebSocket
     mode: str = "text_only"  # "text_only" or "text_and_audio"
     is_speaker: bool = False
@@ -351,6 +386,8 @@ class Room:
     _disconnected_users: Dict[str, dict] = field(default_factory=dict)  # user_id -> {name, language, mode, is_speaker, disconnected_at}
     _speaker_grace_task: Optional[asyncio.Task] = None  # Pending speaker reassignment
     _grace_speaker_id: Optional[str] = None  # Speaker ID held during grace period
+    _intro_announced: bool = False  # One-time room intro prompt has been sent
+    _discussion_auto_release_task: Optional[asyncio.Task] = None  # Inactivity timer for discussion speaker
 
 
     def to_dict(self) -> dict:
@@ -393,10 +430,17 @@ class Room:
 DEFAULT_ROOM_ID = os.getenv("CLASSROOM_DEFAULT_ROOM_ID", "default")
 DEFAULT_ROOM_NAME = os.getenv("CLASSROOM_DEFAULT_ROOM_NAME", "Mira Classroom")
 CLASSROOM_AUTO_DELETE_EMPTY_ROOMS = os.getenv("CLASSROOM_AUTO_DELETE_EMPTY_ROOMS", "false").strip().lower() in ("1", "true", "yes", "on")
+DISCUSSION_AUTO_RELEASE_SECS = int(os.getenv("DISCUSSION_AUTO_RELEASE_SECS", "20"))
 
 
 class RoomManager:
     """Manages classroom rooms, users, and speaker tokens."""
+    _SPEAKER_HANDBACK_LINES = [
+        "Yes {name}, how can I help you?",
+        "Go ahead, {name}. What would you like to ask?",
+        "{name}, I'm listening. What can I help you with?",
+        "Ready, {name}. What should we work on?",
+    ]
 
     def __init__(self):
         self._rooms: Dict[str, Room] = {}
@@ -648,7 +692,7 @@ class RoomManager:
 
         Used to determine the actual language of LLM output (which may differ
         from the speaker's registered language if the LLM drifts).
-        Returns 'hi', 'ta', 'kn', or 'en'.
+        Returns 'hi', 'ta', or 'en'.
         """
         # Strip ASCII/Latin chars, markdown, and whitespace
         import re as _re
@@ -658,9 +702,8 @@ class RoomManager:
 
         devanagari = sum(1 for c in non_latin if '\u0900' <= c <= '\u097F')
         tamil = sum(1 for c in non_latin if '\u0B80' <= c <= '\u0BFF')
-        kannada = sum(1 for c in non_latin if '\u0C80' <= c <= '\u0CFF')
 
-        counts = {"hi": devanagari, "ta": tamil, "kn": kannada}
+        counts = {"hi": devanagari, "ta": tamil}
         best = max(counts, key=counts.get)
         if counts[best] > 0:
             return best
@@ -669,7 +712,7 @@ class RoomManager:
     @staticmethod
     def _make_language_tag(lang_code: str) -> str:
         """Convert a language code to a [User is speaking X] tag for the LLM."""
-        label = {"en": "English", "hi": "Hindi", "ta": "Tamil", "kn": "Kannada"}.get(lang_code, "English")
+        label = {"en": "English", "hi": "Hindi", "ta": "Tamil"}.get(lang_code, "English")
         return f"[User is speaking {label}]"
 
     async def ask_llm(
@@ -713,7 +756,7 @@ class RoomManager:
 
         # Detect speaker's registered language
         if room and room.speaker_id and room.speaker_id in room.users:
-            source_lang = room.users[room.speaker_id].language
+            source_lang = _normalize_classroom_language(room.users[room.speaker_id].language or "en") or "en"
 
         # ── CRITICAL: Ensure language tag is always present ──
         # The voice pipeline (SonioxSTT) adds [User is speaking X] tags,
@@ -727,6 +770,7 @@ class RoomManager:
 
         # Build messages with conversation history for context
         messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "system", "content": _response_language_instruction(source_lang)})
         if room and room.conversation_history:
             # Include last 20 messages for context
             messages.extend(room.conversation_history[-20:])
@@ -1590,6 +1634,7 @@ class RoomManager:
 
         # If speaker left, start grace period before reassigning
         if was_speaker:
+            self._cancel_discussion_auto_release(room)
             room._grace_speaker_id = user_id
             # Cancel any existing grace task
             if room._speaker_grace_task and not room._speaker_grace_task.done():
@@ -1644,6 +1689,42 @@ class RoomManager:
 
     # ── Speaker token ──
 
+    def _cancel_discussion_auto_release(self, room: Room):
+        """Cancel pending discussion auto-release timer, if any."""
+        task = room._discussion_auto_release_task
+        if task and not task.done():
+            task.cancel()
+        room._discussion_auto_release_task = None
+
+    async def _schedule_discussion_auto_release(self, room: Room):
+        """Start/restart inactivity timer for discussion rooms."""
+        self._cancel_discussion_auto_release(room)
+
+        if room.room_type != "discussion" or not room.speaker_id:
+            return
+
+        speaker_id = room.speaker_id
+        timeout_s = max(1, DISCUSSION_AUTO_RELEASE_SECS)
+
+        async def _timeout():
+            try:
+                await asyncio.sleep(timeout_s)
+            except asyncio.CancelledError:
+                return
+
+            if room.room_type != "discussion":
+                return
+            if room.speaker_id != speaker_id:
+                return
+
+            logger.info(
+                f"[CLASSROOM] Discussion inactivity timeout ({timeout_s}s): "
+                f"auto-releasing token from {speaker_id} in {room.room_id}"
+            )
+            await self.pass_token(room.room_id, speaker_id)
+
+        room._discussion_auto_release_task = asyncio.create_task(_timeout())
+
     async def request_token(self, room_id: str, user_id: str) -> bool:
         """Request the speaker token.
 
@@ -1679,6 +1760,8 @@ class RoomManager:
         if not room or room.speaker_id != from_user_id:
             return
 
+        self._cancel_discussion_auto_release(room)
+
         # Clear current speaker
         if from_user_id in room.users:
             room.users[from_user_id].is_speaker = False
@@ -1708,6 +1791,8 @@ class RoomManager:
 
     async def _assign_token(self, room: Room, user_id: str):
         """Assign speaker token to a user."""
+        self._cancel_discussion_auto_release(room)
+
         # Clear previous speaker
         if room.speaker_id and room.speaker_id in room.users:
             room.users[room.speaker_id].is_speaker = False
@@ -1723,6 +1808,52 @@ class RoomManager:
             "speaker_id": user_id,
             "speaker_name": room.users[user_id].name if user_id in room.users else None,
         })
+
+        # Prompt the newly assigned speaker:
+        # Short handback line when speaker token changes.
+        speaker = room.users.get(user_id)
+        if speaker:
+            template = random.choice(self._SPEAKER_HANDBACK_LINES)
+            prompt_text = template.format(name=speaker.name)
+
+            await self._send_json(speaker.websocket, {
+                "type": "bot_text_complete",
+                "text": prompt_text,
+            })
+
+    async def send_first_join_greeting(self, room: Room, user: RoomUser):
+        """Send a one-time join greeting (text + optional TTS audio) to a user."""
+        base_text = f"Welcome to {room.name}, {user.name}. I am Mira. Let's start learning together."
+        text = base_text
+
+        # Translate greeting to user's preferred language when possible.
+        try:
+            if user.language != "en" and self._translator:
+                translated = await self._translator.translate(
+                    text=base_text,
+                    target_lang=user.language,
+                    source_lang="en",
+                )
+                if translated:
+                    text = translated
+        except Exception as e:
+            logger.warning(f"[CLASSROOM] Greeting translation failed for {user.name}: {e}")
+
+        await self._send_json(user.websocket, {
+            "type": "bot_text_complete",
+            "text": text,
+        })
+
+        # Stream greeting speech when user has audio mode enabled.
+        if self._tts and user.mode == "text_and_audio":
+            await self._send_json(user.websocket, {"type": "bot_audio_start"})
+            try:
+                async for frame in self._tts.run_tts(text):
+                    if hasattr(frame, "audio") and frame.audio:
+                        await self._send_bytes(user.websocket, frame.audio)
+            except Exception as e:
+                logger.warning(f"[CLASSROOM] Greeting TTS failed for {user.name}: {e}")
+            await self._send_json(user.websocket, {"type": "bot_audio_end"})
 
     # ── Broadcasting ──
 
@@ -1840,11 +1971,6 @@ class RoomManager:
             f"fanout_latency={fanout_ms}ms | lang={language} | "
             f"text='{text[:50]}'"
         )
-
-        # Discussion rooms: auto-release token after Mira responds
-        if room.room_type == "discussion" and room.speaker_id:
-            logger.info(f"[CLASSROOM] Discussion auto-release: releasing token from {room.speaker_id} in {room.room_id}")
-            await self.pass_token(room.room_id, room.speaker_id)
 
     async def broadcast_bot_audio(
         self,
@@ -2011,6 +2137,7 @@ room_manager = RoomManager()
 # ─────────────────────────────────────────────────────────────────────
 
 from pipecat.frames.frames import (
+    BotStoppedSpeakingFrame,
     Frame,
     TextFrame,
     TranscriptionFrame,
@@ -2040,6 +2167,7 @@ class ClassroomBroadcaster(FrameProcessor):
         self._llm_buffer = ""
         self._last_user_text = ""
         self._last_user_lang = "en"
+        self._awaiting_bot_audio_end: bool = False
 
         # Timing anchors
         self._stt_received_at: float = 0.0
@@ -2056,6 +2184,7 @@ class ClassroomBroadcaster(FrameProcessor):
             self._last_user_text = frame.text
             self._last_user_lang = getattr(frame, "language", "en") or "en"
             self._turn_count += 1
+            self._awaiting_bot_audio_end = False
 
             logger.info(
                 f"[METRICS][CLASSROOM] stt_received | turn={self._turn_count} | "
@@ -2111,6 +2240,18 @@ class ClassroomBroadcaster(FrameProcessor):
                         language=self._last_user_lang,
                     )
                 )
+                if self._room.room_type == "discussion" and self._room.speaker_id:
+                    self._awaiting_bot_audio_end = True
+
+        # Voice mode: arm discussion inactivity timer only after bot audio is fully done.
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            if self._awaiting_bot_audio_end and self._room.room_type == "discussion" and self._room.speaker_id:
+                logger.info(
+                    f"[CLASSROOM] Discussion auto-release armed: "
+                    f"{DISCUSSION_AUTO_RELEASE_SECS}s inactivity for speaker {self._room.speaker_id} in {self._room.room_id}"
+                )
+                await self._room_mgr._schedule_discussion_auto_release(self._room)
+            self._awaiting_bot_audio_end = False
 
         # Forward all frames unchanged
         await self.push_frame(frame, direction)
@@ -2444,10 +2585,15 @@ async def update_user(user_id: str, display_name: str = None,
     profile = await classroom_db.get_user_profile(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
+    normalized_language = None
+    if preferred_language is not None:
+        normalized_language = _normalize_classroom_language(preferred_language)
+        if not normalized_language:
+            raise HTTPException(status_code=400, detail="Unsupported preferred_language. Allowed: en, hi, ta")
     await classroom_db.upsert_user_profile(
         user_id=user_id,
         display_name=display_name or profile.display_name,
-        preferred_language=preferred_language or profile.preferred_language,
+        preferred_language=normalized_language or profile.preferred_language,
         role=role or profile.role,
     )
     updated = await classroom_db.get_user_profile(user_id)
@@ -2458,10 +2604,13 @@ async def update_user(user_id: str, display_name: str = None,
 async def create_user(user_id: str, display_name: str, preferred_language: str = "en",
                       role: str = "student"):
     """Create or update a user profile."""
+    normalized_language = _normalize_classroom_language(preferred_language)
+    if not normalized_language:
+        raise HTTPException(status_code=400, detail="Unsupported preferred_language. Allowed: en, hi, ta")
     profile = await classroom_db.upsert_user_profile(
         user_id=user_id,
         display_name=display_name,
-        preferred_language=preferred_language,
+        preferred_language=normalized_language,
         role=role,
     )
     return profile.to_dict()
@@ -2639,6 +2788,7 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
 
     # Wait for join message
     user = None
+    is_first_join_for_user = False
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         data = json.loads(raw)
@@ -2649,7 +2799,14 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             return
 
         user_id = data.get("user_id", str(uuid.uuid4())[:8])
-        language = data.get("language", "en")
+        language = _normalize_classroom_language(data.get("language", "en"))
+        if not language:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Unsupported language. Allowed: en, hi, ta",
+            })
+            await websocket.close()
+            return
         name = data.get("name", f"User-{user_id[:4]}")
         mode = data.get("mode", "text_only")  # "text_only" or "text_and_audio"
         if mode not in ("text_and_audio", "text_only"):
@@ -2662,6 +2819,14 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             websocket=websocket,
             mode=mode,
         )
+
+        # Determine first-ever join in this room before upsert_room_member runs.
+        try:
+            existing_member = await classroom_db.get_room_member(room_id, user_id)
+            is_first_join_for_user = existing_member is None
+        except Exception as e:
+            logger.warning(f"[CLASSROOM] Could not check existing membership for greeting: {e}")
+            is_first_join_for_user = False
 
         # Legacy fallback: if no teacher is set, only the first user in an
         # empty room becomes teacher. Never rotate teacher on later joins.
@@ -2695,6 +2860,10 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             },
             "recent_messages": recent_messages,
         })
+
+        # One-time per-user-per-room greeting (text + optional speech).
+        if is_first_join_for_user:
+            await room_manager.send_first_join_greeting(room, user)
 
         # NOW auto-assign speaker token if first user (after 'joined' is sent)
         await room_manager.finalize_join(room_id, user_id)
@@ -2731,6 +2900,8 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                 text = data.get("text", "").strip()
                 room = room_manager.get_room(room_id)
                 if text and room and room.speaker_id == user.user_id:
+                    if room.room_type == "discussion":
+                        room_manager._cancel_discussion_auto_release(room)
                     logger.info(f"[CLASSROOM] Text message from {user.name}: {text[:60]}")
 
                     # 1. Broadcast the speaker's question to listeners (translated)
@@ -2755,6 +2926,8 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                 text = data.get("text", "").strip()
                 room = room_manager.get_room(room_id)
                 if text and room and room.speaker_id == user.user_id:
+                    if room.room_type == "discussion":
+                        room_manager._cancel_discussion_auto_release(room)
                     logger.info(f"[CLASSROOM] Speaker transcript from {user.name}: {text[:60]}")
                     await room_manager.broadcast_transcription(
                         room=room,
@@ -2967,6 +3140,13 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                         "type": "topic_suggestions",
                         "topics": topics,
                     })
+
+            elif msg_type in {"leave", "exit_room"}:
+                # Explicit leave from client: close socket now so user is removed
+                # immediately in finally block (no wait for network disconnect).
+                logger.info(f"[CLASSROOM] User {user.user_id} requested leave from room {room_id}")
+                await websocket.close(code=1000, reason="left_room")
+                break
 
             else:
                 logger.debug(f"[CLASSROOM] Unknown message type: {msg_type}")

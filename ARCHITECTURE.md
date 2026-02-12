@@ -120,13 +120,13 @@ Custom Pipecat `STTService` implementation:
 - Streams PCM16 audio (16kHz, mono, 16-bit signed LE)
 - Language identification across 50+ languages
 - Speaker diarization support
-- `detect_language_from_script()` fallback: inspects Unicode blocks (Devanagari → Hindi, Tamil script → Tamil, Kannada script → Kannada) when STT doesn't report language
+- `detect_language_from_script()` fallback: inspects Unicode blocks (Devanagari → Hindi, Tamil script → Tamil) when STT doesn't report language
 - Language tag injection: prepends `[User is speaking Hindi]` to transcriptions for the LLM
 
 ### ElevenLabs TTS Service (`services/elevenlabs_tts.py`)
 
 Factory wrapper around Pipecat's built-in `ElevenLabsTTSService`:
-- **Model**: `eleven_multilingual_v2` (supports Hindi, Tamil, Kannada)
+- **Model**: `eleven_multilingual_v2` (supports Hindi, Tamil)
 - **Voice presets**: Female (Monika Sogam) / Male (Ruhaan)
 - **Tuned params**: `stability=0.75`, `similarity_boost=0.85`, `style=0.0` — prevents high-pitch first-syllable artifacts
 - WebSocket streaming for low latency
@@ -184,7 +184,7 @@ Standalone ElevenLabs TTS (not Pipecat's WebSocket service):
 
 - Uses `AsyncOpenAI` client with `gpt-4o-mini`
 - Low temperature (0.3) for faithful translation
-- System prompt enforces: Devanagari for Hindi, Tamil script for Tamil, Kannada script for Kannada
+- System prompt enforces: Devanagari for Hindi, Tamil script for Tamil
 - Skips translation when source == target language
 - Session-level metrics: call count, average latency, skip count
 - Graceful fallback: returns original text on error
@@ -305,7 +305,7 @@ Topic: The Water Cycle
 ### Base Prompt Key Rules (`v4-base.md`)
 
 1. **Language Rules (highest priority)**: Respond in detected language only. Language tag `[User is speaking Hindi]` is single source of truth. No tag → English default.
-2. **Script enforcement**: Hindi → Devanagari only (never Roman Hindi). Tamil → Tamil script. Kannada → Kannada script.
+2. **Script enforcement**: Hindi → Devanagari only (never Roman Hindi). Tamil → Tamil script.
 3. **Personality**: Warm older sister, curious, playful. Uses Indian references (monsoon, chai, cricket, IPL, Diwali).
 4. **Emotional Awareness**: 3-tier system — Casual (1-2 sentences), Confused (2-3 sentences), Shutdown (3-4 sentences, zero teaching).
 5. **Student Context**: Use name naturally (max once per response). Stay focused on topic if set.
@@ -383,7 +383,7 @@ The classroom broadcasts LLM output sentence-by-sentence (split on `.!?।\n`) r
 ### `translator.py` — Translation Service
 
 - Wraps `AsyncOpenAI` for lightweight LLM-based translation
-- System prompt enforces correct script (Devanagari, Tamil, Kannada)
+- System prompt enforces correct script (Devanagari, Tamil)
 - Strips `[User is speaking ...]` tags before translating
 - Session metrics: call count, total latency, average latency
 
@@ -565,7 +565,7 @@ Science Grade 6 (Water Cycle, multilingual), Math Grade 7 (Fractions, mixed abil
 | **Stage 1: Supervised Fine-Tuning (SFT)** | Fine-tune GPT-4o-mini on curated Mira conversations | 500+ high-scoring eval transcripts (score ≥4 on all dimensions) + manually crafted gold-standard examples | Model learns Mira's personality, Indian cultural references, and Socratic style natively — reducing prompt length by ~60% |
 | **Stage 2: DPO/RLHF** | Direct Preference Optimization using eval judge scores | Pairs of (good response, bad response) from eval runs. Good = score 5, Bad = score ≤3 on any dimension. | Model internalizes quality preferences: brevity, EQ, cultural grounding |
 | **Stage 3: Distillation** | Distill from GPT-4o teacher to smaller model | GPT-4o generates ideal responses for 2000+ diverse scenarios, used to train a smaller model (GPT-4o-mini or open-source 7B) | Lower latency, lower cost, same quality |
-| **Stage 4: Language-Specific Adapters** | LoRA adapters for Hindi, Tamil, Kannada | Monolingual conversation datasets in each language, sourced from eval framework + real classroom transcripts | Better script correctness, more natural code-mixing |
+| **Stage 4: Language-Specific Adapters** | LoRA adapters for Hindi, Tamil | Monolingual conversation datasets in each language, sourced from eval framework + real classroom transcripts | Better script correctness, more natural code-mixing |
 
 **Fine-Tuning Data Pipeline**:
 ```

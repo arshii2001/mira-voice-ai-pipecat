@@ -16,7 +16,7 @@ metadata:
     app: pipecat-v2
 data:
   STT_PROVIDER: "soniox"
-  STT_LANGUAGE_HINTS: "en,hi,ta,kn"
+  STT_LANGUAGE_HINTS: "en,hi,ta"
   TTS_PROVIDER: "svara"
   TTS_WS_URL: "wss://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream"
   TTS_VOICE_GENDER: "female"

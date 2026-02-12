@@ -63,6 +63,34 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "7860"))
 
 
+def _normalize_user_language(lang: Optional[str]) -> str:
+    """Normalize user language to one of en/hi/ta; unknowns default to English."""
+    if not lang:
+        return "en"
+    raw = str(lang).strip().lower()
+    base = raw.split("-", 1)[0].split("_", 1)[0]
+    alias_map = {
+        "english": "en",
+        "eng": "en",
+        "hindi": "hi",
+        "hin": "hi",
+        "tamil": "ta",
+        "tam": "ta",
+    }
+    normalized = alias_map.get(base, base)
+    return normalized if normalized in {"en", "hi", "ta"} else "en"
+
+
+def _stt_hints_for_registered_language(lang: Optional[str]) -> list[str]:
+    """Allowed STT languages by registered user language."""
+    normalized = _normalize_user_language(lang)
+    if normalized == "hi":
+        return ["en", "hi"]
+    if normalized == "ta":
+        return ["en", "ta"]
+    return ["en"]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
@@ -279,10 +307,12 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
         "system_prompt": "...",  // optional
         "context": [...]        // optional
         "mode": "text_and_audio", // optional: "text_and_audio" (default) or "text_only"
+        "enable_greeting": false, // optional: default false (greeting is opt-in)
         "room_id": "...",         // optional: classroom room to broadcast to
         "speaker_id": "...",      // optional: classroom speaker user_id
         "speaker_name": "...",    // optional: classroom speaker name
-        "speaker_language": "en"  // optional: classroom speaker language
+        "speaker_language": "en", // optional: classroom speaker language
+        "language": "en"          // optional: tutor user registered language
     }
 
     Returns dict with system_prompt, context, mode, and optional classroom fields.
@@ -326,20 +356,29 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 logger.warning(f"Invalid mode '{mode}', defaulting to text_and_audio")
                 mode = "text_and_audio"
 
+            # Greeting behavior (opt-in): default is disabled to avoid replaying on reconnects
+            enable_greeting = data.get("enable_greeting", False)
+            if not isinstance(enable_greeting, bool):
+                logger.warning("Invalid enable_greeting type, defaulting to false")
+                enable_greeting = False
+
             # Optional classroom fields
             room_id = data.get("room_id")
             speaker_id = data.get("speaker_id")
             speaker_name = data.get("speaker_name")
             speaker_language = data.get("speaker_language")
+            language = data.get("language")
 
             return {
                 "system_prompt": system_prompt,
                 "context": context,
                 "mode": mode,
+                "enable_greeting": enable_greeting,
                 "room_id": room_id,
                 "speaker_id": speaker_id,
                 "speaker_name": speaker_name,
                 "speaker_language": speaker_language,
+                "language": language,
             }
         else:
             logger.info("First message was not a config message, using defaults")
@@ -347,10 +386,12 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 "system_prompt": None,
                 "context": None,
                 "mode": "text_and_audio",
+                "enable_greeting": False,
                 "room_id": None,
                 "speaker_id": None,
                 "speaker_name": None,
                 "speaker_language": None,
+                "language": None,
             }
 
     except asyncio.TimeoutError:
@@ -359,10 +400,12 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "system_prompt": None,
             "context": None,
             "mode": "text_and_audio",
+            "enable_greeting": False,
             "room_id": None,
             "speaker_id": None,
             "speaker_name": None,
             "speaker_language": None,
+            "language": None,
         }
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in config message: {e}, using defaults")
@@ -370,10 +413,12 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "system_prompt": None,
             "context": None,
             "mode": "text_and_audio",
+            "enable_greeting": False,
             "room_id": None,
             "speaker_id": None,
             "speaker_name": None,
             "speaker_language": None,
+            "language": None,
         }
     except Exception as e:
         logger.warning(f"Error receiving config: {e}, using defaults")
@@ -381,10 +426,12 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
             "system_prompt": None,
             "context": None,
             "mode": "text_and_audio",
+            "enable_greeting": False,
             "room_id": None,
             "speaker_id": None,
             "speaker_name": None,
             "speaker_language": None,
+            "language": None,
         }
 
 
@@ -463,8 +510,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
         extra_processors = None
         classroom_system_prompt = config.get("system_prompt")
-        skip_greeting = False
+        skip_greeting = not bool(config.get("enable_greeting", False))
         context_messages = config.get("context")
+        stt_language_hints = None
+
+        # Tutor mode: enforce STT language allowlist from registered language.
+        # Priority:
+        #   1) config.language
+        #   2) config.speaker_language (legacy clients)
+        #   3) query param language
+        # Unknown/missing language defaults to English-only.
+        if not room_id:
+            requested_lang = (
+                config.get("language")
+                or config.get("speaker_language")
+                or websocket.query_params.get("language")
+            )
+            stt_language_hints = _stt_hints_for_registered_language(requested_lang)
+            logger.info(
+                f"[TUTOR] STT language hints enforced: {stt_language_hints} "
+                f"(registered_lang={requested_lang or 'en(default)'})"
+            )
 
         if room_id:
             room = room_manager.get_room(room_id)
@@ -481,9 +547,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.close()
                 return
             extra_processors = [ClassroomBroadcaster(room=room, room_mgr=room_manager)]
+            # In classroom mode, constrain Soniox by speaker registered language.
+            speaker_lang = room.users[speaker_id].language
+            stt_language_hints = _stt_hints_for_registered_language(speaker_lang)
             # Use co-teaching prompt for classroom voice sessions
             classroom_system_prompt = room_manager._get_co_teaching_prompt(room)
             logger.info(f"[CLASSROOM] Attached broadcaster for room {room_id} (speaker={speaker_id}) with co-teaching prompt")
+            logger.info(f"[CLASSROOM] STT language hints override: {stt_language_hints}")
 
             # If room has conversation history, seed the pipeline with it and skip greeting
             if room.conversation_history:
@@ -504,6 +574,7 @@ async def websocket_endpoint(websocket: WebSocket):
             skip_greeting=skip_greeting,
             metrics_collector=_metrics_collector,
             is_classroom=bool(room_id),
+            stt_language_hints=stt_language_hints,
         )
     except WebSocketDisconnect:
         logger.info("Client disconnected")
@@ -557,7 +628,7 @@ async def inject_text(req: InjectTextRequest):
 @app.get("/voices")
 async def list_voices():
     """List available TTS voices."""
-    # Svara TTS voices (English, Hindi, Tamil, Kannada only)
+    # Svara TTS voices (English, Hindi, Tamil only)
     svara_voices = [
         {"id": "en_male", "name": "English (Male)", "language": "English", "provider": "svara"},
         {"id": "en_female", "name": "English (Female)", "language": "English", "provider": "svara"},
@@ -565,8 +636,6 @@ async def list_voices():
         {"id": "hi_female", "name": "Hindi (Female)", "language": "Hindi", "provider": "svara"},
         {"id": "ta_male", "name": "Tamil (Male)", "language": "Tamil", "provider": "svara"},
         {"id": "ta_female", "name": "Tamil (Female)", "language": "Tamil", "provider": "svara"},
-        {"id": "kn_male", "name": "Kannada (Male)", "language": "Kannada", "provider": "svara"},
-        {"id": "kn_female", "name": "Kannada (Female)", "language": "Kannada", "provider": "svara"},
     ]
 
     # ElevenLabs voices
@@ -602,7 +671,6 @@ async def list_languages():
         {"code": "en", "name": "English"},
         {"code": "hi", "name": "Hindi"},
         {"code": "ta", "name": "Tamil"},
-        {"code": "kn", "name": "Kannada"},
     ]
     return {"languages": languages}
 

@@ -203,13 +203,11 @@ def detect_response_language(text: str) -> str:
 
     devanagari = sum(1 for c in non_latin if '\u0900' <= c <= '\u097F')
     tamil = sum(1 for c in non_latin if '\u0B80' <= c <= '\u0BFF')
-    kannada = sum(1 for c in non_latin if '\u0C80' <= c <= '\u0CFF')
-
-    total_non_latin = devanagari + tamil + kannada
+    total_non_latin = devanagari + tamil
     if total_non_latin == 0:
         return "en"
 
-    counts = {"hi": devanagari, "ta": tamil, "kn": kannada}
+    counts = {"hi": devanagari, "ta": tamil}
     best = max(counts, key=counts.get)
     # If non-Latin chars are >30% of total text, it's that language
     if counts[best] / max(len(text), 1) > 0.15:
@@ -239,7 +237,6 @@ async def test_language_tag_prepend() -> TestResult:
         assert RoomManager._make_language_tag("en") == "[User is speaking English]"
         assert RoomManager._make_language_tag("hi") == "[User is speaking Hindi]"
         assert RoomManager._make_language_tag("ta") == "[User is speaking Tamil]"
-        assert RoomManager._make_language_tag("kn") == "[User is speaking Kannada]"
         assert RoomManager._make_language_tag("fr") == "[User is speaking English]"  # Unknown defaults to English
 
         # Test that a question without a tag gets one
@@ -279,9 +276,6 @@ async def test_detect_text_language_unit() -> TestResult:
 
         # Tamil
         assert detect("ஒளிச்சேர்க்கை என்பது தாவரங்கள்") == "ta"
-
-        # Kannada
-        assert detect("ದ್ಯುತಿಸಂಶ್ಲೇಷಣೆ ಎಂದರೆ") == "kn"
 
         # Mixed (mostly Hindi with some English terms)
         assert detect("यह photosynthesis का process है जिसमें पौधे") == "hi"

@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import time
+from typing import Optional
 
 from pipecat.frames.frames import (
     AudioRawFrame,
@@ -709,7 +710,7 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
 STT_PROVIDER = os.getenv("STT_PROVIDER", "soniox")       # "soniox" | "deepgram" | "whisper"
 SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", "")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-STT_LANGUAGE_HINTS = os.getenv("STT_LANGUAGE_HINTS", "en,hi,ta,kn")  # Comma-separated
+STT_LANGUAGE_HINTS = os.getenv("STT_LANGUAGE_HINTS", "en,hi,ta")  # Comma-separated
 STT_SAMPLE_RATE = int(os.getenv("STT_SAMPLE_RATE", "16000"))
 
 # --- TTS ---
@@ -783,14 +784,27 @@ def get_default_system_prompt() -> str:
 # Greeting text spoken when connection is established
 # NOTE: Single sentence avoids TTS splitting into multiple audio segments
 GREETING_TEXT = os.getenv("GREETING_TEXT",
-    "Namaste! I'm Mira, your study buddy. I speak English, Hindi, Tamil, and Kannada. Ask me anything!")
+    "Namaste! I'm Mira, your study buddy. I speak English, Hindi, and Tamil. Ask me anything!")
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Provider factories — swap provider via env var, no code changes.
 # ─────────────────────────────────────────────────────────────────────
 
-def create_stt_service(sample_rate: int = None):
+def _normalize_language_hint(lang: str) -> Optional[str]:
+    """Normalize language hint values to Soniox-friendly short codes."""
+    if not lang:
+        return None
+    normalized = lang.strip().lower()
+    alias_map = {
+        "english": "en",
+        "hindi": "hi",
+        "tamil": "ta",
+    }
+    return alias_map.get(normalized, normalized)
+
+
+def create_stt_service(sample_rate: int = None, language_hints_override: list[str] | None = None):
     """
     Create an STT service based on STT_PROVIDER env var.
 
@@ -803,7 +817,14 @@ def create_stt_service(sample_rate: int = None):
     """
     provider = STT_PROVIDER.lower()
     sr = sample_rate or STT_SAMPLE_RATE
-    lang_hints = [h.strip() for h in STT_LANGUAGE_HINTS.split(",") if h.strip()]
+    raw_hints = language_hints_override or STT_LANGUAGE_HINTS.split(",")
+    lang_hints = []
+    for hint in raw_hints:
+        normalized = _normalize_language_hint(hint)
+        if normalized:
+            lang_hints.append(normalized)
+    if not lang_hints:
+        lang_hints = ["en"]
 
     if provider == "soniox":
         if not SONIOX_API_KEY:
@@ -812,7 +833,6 @@ def create_stt_service(sample_rate: int = None):
         return SonioxSTTService(
             api_key=SONIOX_API_KEY,
             language_hints=lang_hints,
-            enable_speaker_diarization=True,
             sample_rate=sr,
         )
 
@@ -926,6 +946,7 @@ async def create_bot_pipeline(
     skip_greeting: bool = False,
     metrics_collector=None,
     is_classroom: bool = False,
+    stt_language_hints: list[str] | None = None,
 ) -> tuple[PipelineTask, PipelineRunner, FastAPIWebsocketTransport]:
     """
     Create and configure the bot pipeline.
@@ -941,6 +962,7 @@ async def create_bot_pipeline(
         skip_greeting: If True, skip the greeting message (for reconnects with history).
         metrics_collector: Optional MetricsCollector for aggregated /metrics endpoint.
         is_classroom: Whether this is a classroom voice session (affects metric categorization).
+        stt_language_hints: Optional STT language hints override for this session.
 
     Returns:
         Tuple of (PipelineTask, PipelineRunner, Transport)
@@ -970,7 +992,7 @@ async def create_bot_pipeline(
     )
 
     # === STT Service (provider-agnostic factory) ===
-    stt = create_stt_service(sample_rate=STT_SAMPLE_RATE)
+    stt = create_stt_service(sample_rate=STT_SAMPLE_RATE, language_hints_override=stt_language_hints)
 
     # === TTS Service (provider-agnostic factory) — skipped in text_only mode ===
     tts = None if text_only else create_tts_service(sample_rate=TTS_SAMPLE_RATE)
@@ -1012,9 +1034,9 @@ async def create_bot_pipeline(
     effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
     messages = [{"role": "system", "content": effective_prompt}]
     logger.info(f"[PIPELINE] System prompt: {len(effective_prompt)} chars (version={PROMPT_VERSION})")
-    # Pre-seed the greeting as an assistant message so the LLM knows it was spoken,
-    # even if the greeting audio gets interrupted by the user speaking early.
-    messages.append({"role": "assistant", "content": GREETING_TEXT})
+    # Pre-seed the greeting only when greeting is enabled for this session.
+    if not skip_greeting:
+        messages.append({"role": "assistant", "content": GREETING_TEXT})
     if context_messages:
         messages.extend(context_messages)
         logger.info(f"[PIPELINE] Seeded LLM context with {len(context_messages)} prior messages")
@@ -1138,6 +1160,7 @@ async def run_bot(
     skip_greeting: bool = False,
     metrics_collector=None,
     is_classroom: bool = False,
+    stt_language_hints: list[str] | None = None,
 ):
     """
     Run the bot for a WebSocket connection.
@@ -1151,6 +1174,7 @@ async def run_bot(
         skip_greeting: If True, skip the greeting message (for reconnects)
         metrics_collector: Optional MetricsCollector for aggregated /metrics endpoint.
         is_classroom: Whether this is a classroom voice session.
+        stt_language_hints: Optional STT language hints override for this session.
     """
     task, runner, transport = await create_bot_pipeline(
         websocket,
@@ -1162,6 +1186,7 @@ async def run_bot(
         skip_greeting=skip_greeting,
         metrics_collector=metrics_collector,
         is_classroom=is_classroom,
+        stt_language_hints=stt_language_hints,
     )
 
     # Add transport event handlers for proper RTVI protocol support

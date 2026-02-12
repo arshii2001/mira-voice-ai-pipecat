@@ -23,7 +23,6 @@ LANG_NAMES = {
     "en": "English",
     "hi": "Hindi",
     "ta": "Tamil",
-    "kn": "Kannada",
 }
 
 TRANSLATION_SYSTEM_PROMPT = """You are a real-time translator for a multilingual classroom.
@@ -33,7 +32,7 @@ Rules:
 - Output ONLY the translation. No explanations, no notes, no prefixes.
 - Preserve the tone and style — if it's casual, keep it casual.
 - If the text is already in the target language, return it unchanged.
-- Hindi must be in Devanagari script, Tamil in Tamil script, Kannada in Kannada script.
+- Hindi must be in Devanagari script, Tamil in Tamil script.
 - Keep it natural and spoken — this will be read aloud by TTS.
 - Do NOT add quotes or attribution.
 - Remove any [User is speaking ...] tags from the input before translating.
@@ -70,7 +69,7 @@ class Translator:
 
         Args:
             text: Text to translate
-            target_lang: Target language code (en, hi, ta, kn)
+            target_lang: Target language code (en, hi, ta)
             source_lang: Optional source language code (for logging)
 
         Returns:

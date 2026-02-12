@@ -1,13 +1,12 @@
 """
-Custom STT Service for Soniox Realtime WebSocket API with Speaker Diarization.
+Custom STT Service for Soniox Realtime WebSocket API.
 
-This service integrates with the Soniox realtime STT server which provides
-multilingual ASR with speaker diarization via WebSocket streaming.
+This service integrates with the Soniox realtime STT server for
+multilingual ASR via WebSocket streaming.
 
 KEY FEATURES:
 - Persistent WebSocket connection (always listening)
 - Language identification across 50+ languages
-- Speaker diarization (identify different speakers)
 - Endpoint detection for utterance segmentation
 - Barge-in support
 
@@ -46,9 +45,8 @@ def detect_language_from_script(text: str) -> Optional[str]:
     # Count characters by Unicode block
     devanagari = sum(1 for c in non_latin if "\u0900" <= c <= "\u097F")
     tamil = sum(1 for c in non_latin if "\u0B80" <= c <= "\u0BFF")
-    kannada = sum(1 for c in non_latin if "\u0C80" <= c <= "\u0CFF")
 
-    counts = {"hi": devanagari, "ta": tamil, "kn": kannada}
+    counts = {"hi": devanagari, "ta": tamil}
     best = max(counts, key=counts.get)
     if counts[best] > 0:
         return best
@@ -75,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 # Soniox WebSocket endpoint
 SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
+LANG_LABELS = {"en": "English", "hi": "Hindi", "ta": "Tamil"}
 
 
 @dataclass
@@ -85,10 +84,10 @@ class SonioxConfig:
     sample_rate: int = 16000
     num_channels: int = 1
     include_nonfinal: bool = True
-    enable_speaker_diarization: bool = True
     enable_language_identification: bool = True
     enable_endpoint_detection: bool = True
     language_hints: List[str] = field(default_factory=lambda: ["en", "hi"])
+    language_hints_strict: bool = True
 
 
 class SonioxSTTService(FrameProcessor):
@@ -108,7 +107,6 @@ class SonioxSTTService(FrameProcessor):
     - Receives InputAudioRawFrame from the transport
     - Sends audio to Soniox via persistent WebSocket
     - Emits TranscriptionFrame and InterimTranscriptionFrame
-    - Includes speaker labels when diarization is enabled
     - Handles interruptions without connection reset
     """
 
@@ -121,7 +119,6 @@ class SonioxSTTService(FrameProcessor):
         num_channels: int = 1,
         language_hints: Optional[List[str]] = None,
         include_nonfinal: bool = True,
-        enable_speaker_diarization: bool = True,
         enable_language_identification: bool = True,
         enable_endpoint_detection: bool = True,
         **kwargs
@@ -136,7 +133,6 @@ class SonioxSTTService(FrameProcessor):
             num_channels: Number of audio channels (default 1 for mono)
             language_hints: List of language codes to prioritize for detection
             include_nonfinal: Enable interim transcriptions
-            enable_speaker_diarization: Enable speaker identification
             enable_language_identification: Enable language detection
             enable_endpoint_detection: Enable endpoint detection for utterance segmentation
         """
@@ -151,7 +147,6 @@ class SonioxSTTService(FrameProcessor):
             sample_rate=sample_rate,
             num_channels=num_channels,
             include_nonfinal=include_nonfinal,
-            enable_speaker_diarization=enable_speaker_diarization,
             enable_language_identification=enable_language_identification,
             enable_endpoint_detection=enable_endpoint_detection,
             language_hints=language_hints,
@@ -165,8 +160,8 @@ class SonioxSTTService(FrameProcessor):
 
         # Transcription state
         self._current_text = ""
-        self._current_speaker: Optional[int] = None
         self._detected_language: Optional[str] = None
+        self._last_logged_raw_language: Optional[str] = None
 
         # Barge-in state
         self._user_speaking = False
@@ -174,6 +169,102 @@ class SonioxSTTService(FrameProcessor):
         self._interrupted = False
         self._muted = False
         self._keepalive_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _normalize_lang_code(lang: Optional[str]) -> Optional[str]:
+        """Normalize provider language codes to app-supported short codes."""
+        if not lang:
+            return None
+        raw = str(lang).strip().lower()
+        # Collapse region/script variants (e.g. en-US, zh-CN)
+        base = raw.split("-", 1)[0].split("_", 1)[0]
+        alias_map = {
+            "eng": "en",
+            "english": "en",
+            "hin": "hi",
+            "hindi": "hi",
+            "tam": "ta",
+            "tamil": "ta",
+        }
+        return alias_map.get(base, base)
+
+    def _resolved_language(self, text: str) -> str:
+        """Resolve final language safely, constrained to configured hints."""
+        hint_set = {
+            self._normalize_lang_code(h) or h.strip().lower()
+            for h in (self._config.language_hints or [])
+            if isinstance(h, str) and h.strip()
+        }
+
+        detected = self._normalize_lang_code(self._detected_language)
+        if detected and (not hint_set or detected in hint_set):
+            return detected
+        if detected and hint_set and detected not in hint_set:
+            logger.debug(
+                f"Ignoring detected language '{detected}' outside allowed hints {sorted(hint_set)}"
+            )
+
+        script_lang = detect_language_from_script(text)
+        if script_lang and (not hint_set or script_lang in hint_set):
+            return script_lang
+
+        # Fall back to first configured hint, then English.
+        if self._config.language_hints:
+            first_hint = self._normalize_lang_code(self._config.language_hints[0])
+            if first_hint:
+                return first_hint
+        return "en"
+
+    def _allowed_hint_set(self) -> set[str]:
+        """Normalized language hints for this session."""
+        return {
+            self._normalize_lang_code(h) or h.strip().lower()
+            for h in (self._config.language_hints or [])
+            if isinstance(h, str) and h.strip()
+        }
+
+    @staticmethod
+    def _is_latin_extended(char: str) -> bool:
+        """Allow accented Latin text when English is allowed."""
+        return (
+            "\u00C0" <= char <= "\u00FF"   # Latin-1 Supplement letters
+            or "\u0100" <= char <= "\u017F"  # Latin Extended-A
+            or "\u0180" <= char <= "\u024F"  # Latin Extended-B
+        )
+
+    def _contains_disallowed_script(self, text: str) -> bool:
+        """True when text contains non-ASCII script outside allowed language hints."""
+        allowed = self._allowed_hint_set()
+        if not allowed:
+            return False
+
+        for c in text:
+            # ASCII is always okay
+            if ord(c) <= 0x7F:
+                continue
+
+            # Allow common Unicode punctuation/symbols if English is allowed.
+            if "en" in allowed and "\u2000" <= c <= "\u206F":
+                continue
+
+            if "\u0900" <= c <= "\u097F":  # Devanagari
+                if "hi" in allowed:
+                    continue
+                return True
+
+            if "\u0B80" <= c <= "\u0BFF":  # Tamil
+                if "ta" in allowed:
+                    continue
+                return True
+
+            # Latin diacritics should be treated as English-compatible.
+            if "en" in allowed and self._is_latin_extended(c):
+                continue
+
+            # Any other non-ASCII script is disallowed for this pipeline.
+            return True
+
+        return False
 
     async def start(self, frame: StartFrame):
         """Start the STT service. Connect eagerly for lower first-turn latency."""
@@ -217,8 +308,8 @@ class SonioxSTTService(FrameProcessor):
                 "api_key": self._config.api_key,
                 "model": self._config.model,
                 "language_hints": self._config.language_hints,
+                "language_hints_strict": self._config.language_hints_strict,
                 "enable_language_identification": self._config.enable_language_identification,
-                "enable_speaker_diarization": self._config.enable_speaker_diarization,
                 "enable_endpoint_detection": self._config.enable_endpoint_detection,
                 "audio_format": "pcm_s16le",
                 "sample_rate": self._config.sample_rate,
@@ -329,7 +420,7 @@ class SonioxSTTService(FrameProcessor):
             return
 
         # Soniox response format:
-        # {"tokens": [{"text": "hello", "start_ms": 0, "duration_ms": 500, "is_final": true, "speaker": 0}], ...}
+        # {"tokens": [{"text": "hello", "start_ms": 0, "duration_ms": 500, "is_final": true}], ...}
 
         tokens = data.get("tokens", [])
         if not tokens:
@@ -339,7 +430,6 @@ class SonioxSTTService(FrameProcessor):
 
         # Build text from tokens
         text_parts = []
-        speaker = None
         is_final = False
 
         for token in tokens:
@@ -351,14 +441,12 @@ class SonioxSTTService(FrameProcessor):
             if token.get("is_final", False):
                 is_final = True
 
-            # Track speaker if diarization is enabled
-            if "speaker" in token and self._config.enable_speaker_diarization:
-                speaker = token["speaker"]
-
             # Track detected language if language identification is enabled
             if "language" in token and self._config.enable_language_identification:
                 self._detected_language = token["language"]
-                logger.debug(f"Soniox detected language: {self._detected_language}")
+                if self._detected_language != self._last_logged_raw_language:
+                    self._last_logged_raw_language = self._detected_language
+                    logger.debug(f"Soniox detected language: {self._detected_language}")
 
         text = "".join(text_parts).strip()  # No space - tokens may include spaces
         # Remove Soniox end token
@@ -366,11 +454,13 @@ class SonioxSTTService(FrameProcessor):
         if not text:
             return
 
-        # Format text with speaker label if diarization is enabled
         formatted_text = text
-        if speaker is not None and self._config.enable_speaker_diarization:
-            formatted_text = f"Speaker {speaker}: {text}"
-            self._current_speaker = speaker
+        if self._contains_disallowed_script(formatted_text):
+            logger.warning(
+                f"Dropping Soniox transcript with disallowed script "
+                f"(hints={self._config.language_hints}): '{formatted_text[:80]}'"
+            )
+            return
 
         # Check fin_audio_proc (final audio processed) or is_final flag
         if data.get("fin_audio_proc", False) or is_final:
@@ -379,12 +469,13 @@ class SonioxSTTService(FrameProcessor):
                 self._interrupted = False
                 self._current_text = ""
 
-                # Detect language: prefer Soniox's language field, fallback to script detection
-                lang = self._detected_language
-                if not lang:
-                    lang = detect_language_from_script(formatted_text) or "en"
-                    logger.info(f"Language detected from script: {lang}")
-                lang_label = {"en": "English", "hi": "Hindi", "ta": "Tamil", "kn": "Kannada"}.get(lang, lang)
+                # Resolve language per-utterance and clamp to configured hints.
+                lang = self._resolved_language(formatted_text)
+                logger.info(
+                    f"Language resolved for final transcript: {lang} "
+                    f"(raw_detected={self._detected_language}, hints={self._config.language_hints})"
+                )
+                lang_label = LANG_LABELS.get(lang, "English")
                 tagged_text = f"[User is speaking {lang_label}] {formatted_text}"
 
                 await self.push_frame(
@@ -395,6 +486,9 @@ class SonioxSTTService(FrameProcessor):
                         language=lang,
                     )
                 )
+                # Prevent stale language from carrying into a later utterance.
+                self._detected_language = None
+                self._last_logged_raw_language = None
         elif not self._muted and self._config.include_nonfinal:
             # Interim result
             logger.debug(f"Soniox interim: {formatted_text[:50]}...")
@@ -405,7 +499,7 @@ class SonioxSTTService(FrameProcessor):
                     text=formatted_text,
                     user_id="",
                     timestamp="",
-                    language=self._detected_language or "en",
+                    language=self._resolved_language(formatted_text),
                 )
             )
 
@@ -458,6 +552,9 @@ class SonioxSTTService(FrameProcessor):
         # === User Speaking State ===
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._user_speaking = True
+            # Reset per-utterance language state to avoid stale carry-over.
+            self._detected_language = None
+            self._last_logged_raw_language = None
             # Connect to Soniox when user starts speaking (lazy connection)
             if not self._connected:
                 logger.info("User started speaking - connecting to Soniox")

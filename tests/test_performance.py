@@ -105,7 +105,7 @@ CLASSROOM_PROMPTS = [
     "How do magnets work? Short answer.",
 ]
 
-LISTENER_LANGUAGES = ["hi", "ta", "kn"]  # Hindi, Tamil, Kannada
+LISTENER_LANGUAGES = ["hi", "ta"]  # Hindi, Tamil
 
 # Lightweight prompts for --prod mode (short answers → minimal LLM/translation load)
 PROD_TUTOR_PROMPT = "What is 2+2? One word answer."

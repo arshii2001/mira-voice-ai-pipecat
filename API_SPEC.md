@@ -56,7 +56,7 @@ Returns current server configuration — useful for UI to discover capabilities.
 
   "default_voice": "en_female",
   "default_language": "auto",
-  "supported_languages": ["en", "hi", "ta", "kn"],
+  "supported_languages": ["en", "hi", "ta"],
   "supported_modes": ["text_and_audio", "text_only"]
 }
 ```
@@ -104,7 +104,6 @@ List supported STT languages.
     { "code": "en", "name": "English" },
     { "code": "hi", "name": "Hindi" },
     { "code": "ta", "name": "Tamil" },
-    { "code": "kn", "name": "Kannada" }
   ]
 }
 ```
@@ -289,7 +288,7 @@ Multiple users in a room. One holds the **speaker token** and talks to Mira. All
       "users": [
         { "user_id": "ravi-01", "name": "Ravi", "language": "hi", "mode": "text_and_audio", "is_speaker": true },
         { "user_id": "priya-02", "name": "Priya", "language": "ta", "mode": "text_and_audio", "is_speaker": false },
-        { "user_id": "anil-03", "name": "Anil", "language": "kn", "mode": "text_only", "is_speaker": false }
+        { "user_id": "anil-03", "name": "Anil", "language": "ta", "mode": "text_only", "is_speaker": false }
       ],
       "speaker_id": "ravi-01",
       "speaker_name": "Ravi",
@@ -403,7 +402,7 @@ Client                                      Server
 | `type` | string | Yes | — | Must be `"join"` |
 | `user_id` | string | No | Auto-generated | Unique user identifier |
 | `name` | string | No | `"User-{id}"` | Display name |
-| `language` | string | No | `"en"` | Preferred language: `en`, `hi`, `ta`, `kn` |
+| `language` | string | No | `"en"` | Preferred language: `en`, `hi`, `ta` |
 | `mode` | string | No | `"text_and_audio"` | `"text_and_audio"` or `"text_only"` |
 
 ---
@@ -490,7 +489,7 @@ Client                                      Server
   "user": {
     "user_id": "anil-03",
     "name": "Anil",
-    "language": "kn",
+    "language": "ta",
     "mode": "text_and_audio",
     "is_speaker": false
   }
@@ -658,7 +657,7 @@ The speaker hears Mira directly. Listeners hear translated versions.
 | `en` | English |
 | `hi` | Hindi |
 | `ta` | Tamil |
-| `kn` | Kannada |
+
 | `auto` | Auto-detect (STT only) |
 
 ### Modes
@@ -746,8 +745,8 @@ Sent as JSON `{"type": "error", "message": "..."}` before closing.
                       │                                      │
   Listener 2         │                                      │
   ┌────────┐         │                                      │
-  │ Anil   │◄────────│  JSON: translated text (Kannada)      │
-  │(Kannada│◄────────│  Binary: TTS audio (Kannada)          │
+  │ Anil   │◄────────│  JSON: translated text (Tamil)      │
+  │ (Tamil)│◄────────│  Binary: TTS audio (Tamil)          │
   │text_only)        │  (no audio — text_only mode)          │
   └────────┘         │                                      │
                       └──────────────────────────────────────┘
