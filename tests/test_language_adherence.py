@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import aiohttp
+import jwt as pyjwt
 
 try:
     import websockets
@@ -67,6 +68,7 @@ HTTP_URL = os.getenv("PIPECAT_HTTP_URL", "http://mira-voice:7860")
 CLASSROOM_WS_BASE = os.getenv("CLASSROOM_WS_URL", "ws://mira-voice:7860/classroom/rooms")
 TEST_ADMIN_ID = os.getenv("TEST_ADMIN_ID", "test-admin")
 TEST_ADMIN_NAME = os.getenv("TEST_ADMIN_NAME", "Test Admin")
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +77,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("test_language")
 _APPROVED_TEACHERS: set[str] = set()
+
+
+def _make_jwt(user_id: str, email: str = "") -> str:
+    """Generate a JWT token for test auth when WEBUI_SECRET_KEY is set."""
+    if not WEBUI_SECRET_KEY:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": email or f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
 
 
 # ─────────────────────────────────────────────────
@@ -90,12 +104,16 @@ class TestResult:
 
 
 def _auth_headers(user_id: str, user_name: str, role: str = "user") -> dict:
-    return {
+    headers = {
         "x-user-id": user_id,
         "x-user-name": user_name,
         "x-user-email": f"{user_id}@example.test",
         "x-user-role": role,
     }
+    token = _make_jwt(user_id)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 async def ensure_teacher_role(user_id: str, user_name: str) -> None:
@@ -181,14 +199,18 @@ async def api_delete_room(room_id: str):
 async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
                     role: str = "student", mode: str = "text_only"):
     """Send join message and wait for joined event."""
-    await ws.send(json.dumps({
+    join_msg = {
         "type": "join",
         "user_id": user_id,
         "name": name,
         "language": language,
         "role": role,
         "mode": mode,
-    }))
+    }
+    token = _make_jwt(user_id)
+    if token:
+        join_msg["token"] = token
+    await ws.send(json.dumps(join_msg))
     # Collect events until we get "joined"
     events = []
     deadline = time.time() + 5
@@ -205,16 +227,57 @@ async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
     raise TimeoutError(f"Never got 'joined' event. Got: {[e.get('type') for e in events]}")
 
 
+async def wait_for_token(ws, expected_speaker: str = None, timeout: float = 30.0) -> dict:
+    """Wait until we receive a token_changed event (optionally for a specific speaker).
+
+    Also drains any other messages while waiting.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=2)
+            if isinstance(raw, str):
+                msg = json.loads(raw)
+                if msg.get("type") == "token_changed":
+                    if expected_speaker is None or msg.get("speaker_id") == expected_speaker:
+                        return msg
+        except asyncio.TimeoutError:
+            continue
+    raise TimeoutError(f"Never got token_changed for {expected_speaker} within {timeout}s")
+
+
+async def drain_messages(ws, drain_secs: float = 2.0):
+    """Drain all pending messages from a websocket for the given duration.
+
+    Useful after token transfers to consume greetings and broadcasts
+    before sending the next text_message.
+    """
+    deadline = time.time() + drain_secs
+    drained = 0
+    while time.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+            if isinstance(raw, str):
+                msg = json.loads(raw)
+                logger.debug(f"[DRAIN] {msg.get('type')}: {str(msg)[:100]}")
+                drained += 1
+        except asyncio.TimeoutError:
+            break  # No more messages pending
+    if drained:
+        logger.info(f"[DRAIN] Consumed {drained} pending messages")
+
+
 async def send_text_and_collect(ws, text: str, timeout: float = 15.0) -> dict:
     """Send a text_message and collect bot_text tokens + bot_text_complete.
 
-    Returns: {"tokens": [...], "full_response": str, "all_events": [...]}
+    Returns: {"tokens": [...], "full_response": str, "all_events": [...], "error": str|None}
     """
     await ws.send(json.dumps({"type": "text_message", "text": text}))
 
     tokens = []
     full_response = ""
     all_events = []
+    error = None
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -223,7 +286,11 @@ async def send_text_and_collect(ws, text: str, timeout: float = 15.0) -> dict:
             if isinstance(raw, str):
                 msg = json.loads(raw)
                 all_events.append(msg)
-                if msg.get("type") == "bot_text":
+                if msg.get("type") == "error":
+                    error = msg.get("message", "unknown error")
+                    logger.warning(f"Server error during send_text_and_collect: {error}")
+                    break
+                elif msg.get("type") == "bot_text":
                     tokens.append(msg.get("text", ""))
                 elif msg.get("type") == "bot_text_complete":
                     full_response = msg.get("text", "")
@@ -234,7 +301,7 @@ async def send_text_and_collect(ws, text: str, timeout: float = 15.0) -> dict:
     if not full_response and tokens:
         full_response = "".join(tokens)
 
-    return {"tokens": tokens, "full_response": full_response, "all_events": all_events}
+    return {"tokens": tokens, "full_response": full_response, "all_events": all_events, "error": error}
 
 
 async def send_teacher_action_and_collect(ws, action: str, payload: str = "",
@@ -249,6 +316,7 @@ async def send_teacher_action_and_collect(ws, action: str, payload: str = "",
     tokens = []
     full_response = ""
     all_events = []
+    error = None
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -257,7 +325,11 @@ async def send_teacher_action_and_collect(ws, action: str, payload: str = "",
             if isinstance(raw, str):
                 msg = json.loads(raw)
                 all_events.append(msg)
-                if msg.get("type") == "bot_text":
+                if msg.get("type") == "error":
+                    error = msg.get("message", "unknown error")
+                    logger.warning(f"Server error during teacher_action: {error}")
+                    break
+                elif msg.get("type") == "bot_text":
                     tokens.append(msg.get("text", ""))
                 elif msg.get("type") == "bot_text_complete":
                     full_response = msg.get("text", "")
@@ -268,7 +340,7 @@ async def send_teacher_action_and_collect(ws, action: str, payload: str = "",
     if not full_response and tokens:
         full_response = "".join(tokens)
 
-    return {"tokens": tokens, "full_response": full_response, "all_events": all_events}
+    return {"tokens": tokens, "full_response": full_response, "all_events": all_events, "error": error}
 
 
 def detect_response_language(text: str) -> str:
@@ -940,32 +1012,52 @@ async def test_discussion_room_multi_student_lang() -> TestResult:
         # Student A (English)
         ws_a = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
         await join_room(ws_a, room_id, "disc-multi-en", "StudentA_EN", "en", role="student")
+        # Drain join greetings + token_changed so they don't pollute send_text_and_collect
+        await drain_messages(ws_a, drain_secs=3.0)
 
         # Student B (Hindi)
         ws_b = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
         await join_room(ws_b, room_id, "disc-multi-hi", "StudentB_HI", "hi", role="student")
+        # Drain join greetings / user_joined broadcasts
+        await drain_messages(ws_b, drain_secs=2.0)
+        # Also drain ws_a which gets user_joined broadcast for Student B
+        await drain_messages(ws_a, drain_secs=1.0)
 
-        # Step 1: Student A asks in English
+        # Step 1: Student A asks in English (already has speaker token as first joiner)
         r1 = await send_text_and_collect(ws_a, "What is the water cycle? Brief.")
-        assert r1["full_response"], "No response for Student A"
+        assert r1["full_response"], f"No response for Student A: error={r1.get('error')}"
         assert_language(r1["full_response"], "en", "Discussion: Student A (EN) question")
         logger.info(f"Student A (EN) response: lang={detect_response_language(r1['full_response'])}")
 
-        # Wait a bit for token auto-release
-        await asyncio.sleep(1)
+        # Student A releases token so Student B can speak
+        await ws_a.send(json.dumps({"type": "release_token"}))
+        await asyncio.sleep(0.5)
 
-        # Step 2: Student B asks in Hindi
+        # Student B requests the token and waits for it
+        await ws_b.send(json.dumps({"type": "request_token"}))
+        await wait_for_token(ws_b, expected_speaker="disc-multi-hi", timeout=15.0)
+        # Drain greeting / broadcast messages before sending
+        await drain_messages(ws_b, drain_secs=3.0)
+
+        # Step 2: Student B asks in Hindi (now has speaker token)
         r2 = await send_text_and_collect(ws_b, "गुरुत्वाकर्षण क्या है?")
-        assert r2["full_response"], "No response for Student B"
+        assert r2["full_response"], f"No response for Student B: error={r2.get('error')}"
         assert_language(r2["full_response"], "hi", "Discussion: Student B (HI) question")
         logger.info(f"Student B (HI) response: lang={detect_response_language(r2['full_response'])}")
 
-        # Wait for token auto-release
-        await asyncio.sleep(1)
+        # Student B releases token so Student A can speak again
+        await ws_b.send(json.dumps({"type": "release_token"}))
+        await asyncio.sleep(0.5)
+
+        # Student A requests the token back
+        await ws_a.send(json.dumps({"type": "request_token"}))
+        await wait_for_token(ws_a, expected_speaker="disc-multi-en", timeout=15.0)
+        # Drain any broadcast messages before sending
+        await drain_messages(ws_a, drain_secs=3.0)
 
         # Step 3: Student A asks again in English — must NOT drift to Hindi
         r3 = await send_text_and_collect(ws_a, "Tell me about volcanoes. Brief.")
-        assert r3["full_response"], "No response for Student A (second question)"
+        assert r3["full_response"], f"No response for Student A (second question): error={r3.get('error')}"
         assert_language(r3["full_response"], "en", "Discussion: Student A (EN) after Hindi history")
         logger.info(f"Student A (EN) second response: lang={detect_response_language(r3['full_response'])}")
 
@@ -1023,13 +1115,19 @@ async def main():
 
     tests_to_run = ALL_TESTS if args.test == "all" else {args.test: ALL_TESTS[args.test]}
 
+    PER_TEST_TIMEOUT = 120  # seconds — hard cap per test to prevent hangs
+
     results = []
     for name, test_fn in tests_to_run.items():
         print()
         logger.info("=" * 60)
         logger.info(f"  LANGUAGE TEST: {name.upper()}")
         logger.info("=" * 60)
-        result = await test_fn()
+        try:
+            result = await asyncio.wait_for(test_fn(), timeout=PER_TEST_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(f"  TEST {name.upper()} TIMED OUT after {PER_TEST_TIMEOUT}s")
+            result = TestResult(name=name, passed=False, error=f"Timed out after {PER_TEST_TIMEOUT}s", duration_sec=PER_TEST_TIMEOUT)
         results.append(result)
 
     # Summary

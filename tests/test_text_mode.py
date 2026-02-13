@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+import jwt as pyjwt
 
 try:
     import websockets
@@ -55,6 +56,7 @@ HTTP_URL = os.getenv("PIPECAT_HTTP_URL", "http://mira-voice:7860")
 AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/tests/test_audio")
 SAMPLE_RATE = 16000
 CHUNK_DURATION_MS = 100
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +64,18 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("text-mode-test")
+
+
+def _make_jwt(user_id: str = "test-text-user") -> str:
+    """Generate a JWT token for test auth when WEBUI_SECRET_KEY is set."""
+    if not WEBUI_SECRET_KEY:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
 
 
 # ─────────────────────────────────────────────────
@@ -170,6 +184,9 @@ class ModeTestClient:
             config["mode"] = mode
         if system_prompt is not None:
             config["system_prompt"] = system_prompt
+        token = _make_jwt()
+        if token:
+            config["token"] = token
         logger.info(f"Sending config: {json.dumps(config)}")
         await self.ws.send(json.dumps(config))
 
@@ -243,12 +260,20 @@ class ModeTestClient:
 # Tests
 # ─────────────────────────────────────────────────
 
+def _jwt_headers() -> dict:
+    """Return Authorization header if WEBUI_SECRET_KEY is set."""
+    token = _make_jwt()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
+
+
 async def test_config() -> TestResult:
     """Test 1: /config endpoint advertises supported_modes."""
     start = time.time()
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/config") as resp:
+            async with session.get(f"{HTTP_URL}/config", headers=_jwt_headers()) as resp:
                 assert resp.status == 200, f"Expected 200, got {resp.status}"
                 data = await resp.json()
 
@@ -274,8 +299,14 @@ async def test_default_mode() -> TestResult:
     client = ModeTestClient()
     try:
         await client.connect()
-        # Do NOT send any config message — should default to text_and_audio
-        logger.info("No config sent — waiting for greeting audio...")
+        # When auth is enabled, we must send a config with token even for default mode
+        token = _make_jwt()
+        if token:
+            await client.ws.send(json.dumps({"type": "config", "token": token}))
+            logger.info("Sent minimal config with JWT token — waiting for greeting audio...")
+        else:
+            # Do NOT send any config message — should default to text_and_audio
+            logger.info("No config sent — waiting for greeting audio...")
         await client.receive(duration=15.0)
 
         got_audio = client.audio_chunks > 0

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import jwt as pyjwt
 
 try:
     import websockets
@@ -47,6 +48,7 @@ AUDIO_DIR = os.getenv("AUDIO_DIR", "/app/tests/test_audio")  # Pre-recorded WAV 
 SAMPLE_RATE = 16000
 NUM_CHANNELS = 1
 CHUNK_DURATION_MS = 100  # Send 100ms audio chunks (like a real client)
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +56,18 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("rtvi-test")
+
+
+def _make_jwt(user_id: str = "test-rtvi-user") -> str:
+    """Generate a JWT token for test auth when WEBUI_SECRET_KEY is set."""
+    if not WEBUI_SECRET_KEY:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
 
 
 # ─────────────────────────────────────────────────
@@ -211,8 +225,11 @@ class RTVITestClient:
         # Send initial config message — include language "hi" so STT hints
         # allow Hindi (our test WAVs contain Hindi speech).
         config_msg = {"type": "config", "enable_greeting": enable_greeting, "language": "hi"}
+        token = _make_jwt()
+        if token:
+            config_msg["token"] = token
         await self.ws.send(json.dumps(config_msg))
-        logger.info(f"Sent config (enable_greeting={enable_greeting}, language=hi)")
+        logger.info(f"Sent config (enable_greeting={enable_greeting}, language=hi, jwt={'yes' if token else 'no'})")
 
     async def disconnect(self):
         if self.ws:

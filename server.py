@@ -139,9 +139,12 @@ app.add_middleware(
 app.include_router(classroom_router)
 
 
-@app.get("/health", dependencies=[Depends(_require_jwt)])
+@app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    No JWT required — used by K8s probes and client pre-flight checks.
+    """
     return {"status": "healthy", "service": "mira-voice-ai-pipecat"}
 
 

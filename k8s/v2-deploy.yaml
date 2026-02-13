@@ -84,7 +84,7 @@ spec:
         - name: acr-iaienterpriseacr
       containers:
         - name: pipecat-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.4
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.5
           imagePullPolicy: Always
           ports:
             - containerPort: 7860
@@ -264,7 +264,7 @@ spec:
         - name: acr-iaienterpriseacr
       containers:
         - name: openwebui-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-openwebui-v3.4
+          image: iaienterpriseacr.azurecr.io/audio:mira-openwebui-v3.5
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

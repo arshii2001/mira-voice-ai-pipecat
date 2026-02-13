@@ -359,7 +359,7 @@ class RoomUser:
     name: str
     language: str  # preferred language code: en, hi, ta
     websocket: WebSocket
-    mode: str = "text_only"  # "text_only" or "text_and_audio"
+    mode: str = "text_and_audio"  # "text_only" or "text_and_audio"
     is_speaker: bool = False
     joined_at: float = field(default_factory=time.time)
 
@@ -2917,9 +2917,9 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             await websocket.close()
             return
         name = data.get("name", f"User-{user_id[:4]}")
-        mode = data.get("mode", "text_only")  # "text_only" or "text_and_audio"
+        mode = data.get("mode", "text_and_audio")  # "text_only" or "text_and_audio"
         if mode not in ("text_and_audio", "text_only"):
-            mode = "text_only"
+            mode = "text_and_audio"
 
         user = RoomUser(
             user_id=user_id,

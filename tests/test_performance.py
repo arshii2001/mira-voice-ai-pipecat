@@ -62,12 +62,15 @@ except ImportError:
     print("pip install websockets")
     sys.exit(1)
 
+import jwt as pyjwt
+
 # ─────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────
 HTTP_URL = os.getenv("PIPECAT_HTTP_URL", "http://localhost:7860")
 WS_URL = os.getenv("PIPECAT_WS_URL", "ws://localhost:7860/ws")
 CLASSROOM_WS_BASE = os.getenv("CLASSROOM_WS_URL", "ws://localhost:7860/classroom/rooms")
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +78,26 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("perf-test")
+
+
+def _make_jwt(user_id: str = "test-perf-user") -> str:
+    """Generate a JWT token for test auth when WEBUI_SECRET_KEY is set."""
+    if not WEBUI_SECRET_KEY:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
+
+
+def _jwt_headers(user_id: str = "test-perf-user") -> dict:
+    """Return Authorization header if WEBUI_SECRET_KEY is set."""
+    token = _make_jwt(user_id)
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 # ─────────────────────────────────────────────────
 # Test prompts — short to keep latency measurable
@@ -157,10 +180,14 @@ async def drain(ws, duration: float = 1.0) -> List[dict]:
 
 async def join_room(ws, room_id: str, user_id: str, name: str,
                     language: str = "en", mode: str = "text_only") -> dict:
-    await ws.send(json.dumps({
+    join_msg = {
         "type": "join", "user_id": user_id,
         "name": name, "language": language, "mode": mode,
-    }))
+    }
+    token = _make_jwt(user_id)
+    if token:
+        join_msg["token"] = token
+    await ws.send(json.dumps(join_msg))
     for _ in range(10):
         msg = await recv_json_nonbinary(ws, timeout=3.0)
         if msg and msg.get("type") == "joined":
@@ -170,7 +197,7 @@ async def join_room(ws, room_id: str, user_id: str, name: str,
 
 async def fetch_metrics() -> dict:
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{HTTP_URL}/metrics") as resp:
+        async with session.get(f"{HTTP_URL}/metrics", headers=_jwt_headers()) as resp:
             return await resp.json()
 
 
@@ -193,6 +220,7 @@ async def phase_tutor_text(iterations: int):
             async with session.post(
                 f"{HTTP_URL}/chat",
                 json={"messages": [{"role": "user", "content": prompt}], "stream": True},
+                headers=_jwt_headers(),
             ) as resp:
                 async for line in resp.content:
                     decoded = line.decode().strip()
@@ -211,6 +239,7 @@ async def phase_tutor_text(iterations: int):
             async with session.post(
                 f"{HTTP_URL}/chat",
                 json={"messages": [{"role": "user", "content": prompt}], "stream": False},
+                headers=_jwt_headers(),
             ) as resp:
                 body = await resp.json()
         total_ms = round((time.time() - t0) * 1000, 1)
@@ -561,6 +590,7 @@ async def phase_prod_smoke():
         async with session.post(
             f"{HTTP_URL}/chat",
             json={"messages": [{"role": "user", "content": PROD_TUTOR_PROMPT}], "stream": True},
+            headers=_jwt_headers(),
         ) as resp:
             async for line in resp.content:
                 decoded = line.decode().strip()
@@ -694,7 +724,7 @@ async def main():
     # ── Verify server is reachable ──
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/health", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(f"{HTTP_URL}/health", headers=_jwt_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     print(f"  ❌ Server health check failed: {resp.status}")
                     sys.exit(1)

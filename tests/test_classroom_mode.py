@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import aiohttp
+import jwt as pyjwt
 import numpy as np
 
 try:
@@ -78,6 +79,7 @@ SAMPLE_RATE = 16000
 CHUNK_DURATION_MS = 100
 TEST_ADMIN_ID = os.getenv("TEST_ADMIN_ID", "test-admin")
 TEST_ADMIN_NAME = os.getenv("TEST_ADMIN_NAME", "Test Admin")
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +88,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("classroom-test")
 _APPROVED_TEACHERS: set[str] = set()
+
+
+def _make_jwt(user_id: str, email: str = "") -> str:
+    """Generate a JWT token for test auth when WEBUI_SECRET_KEY is set."""
+    if not WEBUI_SECRET_KEY:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": email or f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
 
 
 def _is_remote_mode() -> bool:
@@ -135,12 +149,16 @@ def chunk_audio(pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> List[bytes]
 # Test helpers
 # ─────────────────────────────────────────────────
 def _auth_headers(user_id: str, user_name: str, role: str = "user") -> dict:
-    return {
+    headers = {
         "x-user-id": user_id,
         "x-user-name": user_name,
         "x-user-email": f"{user_id}@example.test",
         "x-user-role": role,
     }
+    token = _make_jwt(user_id)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 async def ensure_teacher_role(user_id: str, user_name: str) -> None:
@@ -288,13 +306,17 @@ async def wait_for_message_type(ws, msg_type: str, timeout: float = 5.0) -> Opti
 async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
                     mode: str = "text_only") -> dict:
     """Send join message and return the 'joined' response."""
-    await ws.send(json.dumps({
+    join_msg = {
         "type": "join",
         "user_id": user_id,
         "name": name,
         "language": language,
         "mode": mode,
-    }))
+    }
+    token = _make_jwt(user_id)
+    if token:
+        join_msg["token"] = token
+    await ws.send(json.dumps(join_msg))
     # Collect messages until we get 'joined'
     for _ in range(10):
         msg = await recv_json_nonbinary(ws, timeout=3.0)
@@ -1493,12 +1515,16 @@ async def test_speaker_pipeline() -> TestResult:
 
         # Ravi connects to /ws (speaker pipeline) with classroom metadata
         ws_speaker = await websockets.connect(WS_URL)
-        await ws_speaker.send(json.dumps({
+        speaker_config = {
             "type": "config",
             "mode": "text_and_audio",
             "room_id": room_id,
             "speaker_id": "ravi-01",
-        }))
+        }
+        ws_jwt = _make_jwt("ravi-01")
+        if ws_jwt:
+            speaker_config["token"] = ws_jwt
+        await ws_speaker.send(json.dumps(speaker_config))
         logger.info("  Speaker pipeline connected to /ws ✓")
 
         # Wait for greeting
@@ -1951,17 +1977,20 @@ async def test_metrics_endpoint() -> TestResult:
     t0 = time.time()
     try:
         # ── Step 0: Read baseline metrics ──
+        metrics_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/metrics") as resp:
+            async with session.get(f"{HTTP_URL}/metrics", headers=metrics_headers) as resp:
                 assert resp.status == 200, f"/metrics returned {resp.status}"
                 baseline = await resp.json()
         logger.info(f"  0. Baseline metrics fetched (uptime={baseline['uptime_seconds']}s)")
 
         # ── Step 1: Tutor text — non-streaming ──
+        chat_headers = _auth_headers(TEST_ADMIN_ID, TEST_ADMIN_NAME, role="admin")
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{HTTP_URL}/chat",
                 json={"messages": [{"role": "user", "content": "What is 2+2? One word."}], "stream": False},
+                headers=chat_headers,
             ) as resp:
                 assert resp.status == 200, f"/chat sync failed: {resp.status}"
                 body = await resp.json()
@@ -1973,6 +2002,7 @@ async def test_metrics_endpoint() -> TestResult:
             async with session.post(
                 f"{HTTP_URL}/chat",
                 json={"messages": [{"role": "user", "content": "What is gravity? One sentence."}], "stream": True},
+                headers=chat_headers,
             ) as resp:
                 assert resp.status == 200, f"/chat stream failed: {resp.status}"
                 sse_lines = []
@@ -1984,7 +2014,11 @@ async def test_metrics_endpoint() -> TestResult:
 
         # ── Step 2: Tutor voice — connect/disconnect (no speech) ──
         voice_ws = await websockets.connect(WS_URL)
-        await voice_ws.send(json.dumps({"type": "config"}))
+        voice_config = {"type": "config"}
+        ws_jwt = _make_jwt("metrics-voice-user")
+        if ws_jwt:
+            voice_config["token"] = ws_jwt
+        await voice_ws.send(json.dumps(voice_config))
         session_msg = await recv_json_nonbinary(voice_ws, timeout=10)
         assert session_msg and session_msg.get("type") == "session_id", \
             f"Expected session_id, got {session_msg}"
@@ -2048,7 +2082,7 @@ async def test_metrics_endpoint() -> TestResult:
 
         # ── Step 5: Fetch and validate /metrics ──
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{HTTP_URL}/metrics") as resp:
+            async with session.get(f"{HTTP_URL}/metrics", headers=metrics_headers) as resp:
                 assert resp.status == 200
                 metrics = await resp.json()
 

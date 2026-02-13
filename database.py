@@ -185,7 +185,7 @@ class RoomMemberRecord:
     display_name: str
     language: str = "en"
     role: str = "student"  # "teacher" | "student" | "observer"
-    mode: str = "text_only"  # "text_only" | "text_and_audio"
+    mode: str = "text_and_audio"  # "text_only" | "text_and_audio"
     joined_at: float = 0.0
     last_active: float = 0.0
 
