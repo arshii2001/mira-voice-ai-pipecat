@@ -2,9 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps
+# System deps (ffmpeg needed by pydub for gTTS audio conversion)
 RUN apt-get update && apt-get install -y \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Python deps — match pipecat-ai version from main server
@@ -27,6 +28,11 @@ COPY tests/test_text_audio_sync.py /app/tests/
 COPY tests/test_classroom_integration.py /app/tests/
 COPY tests/test_components.py /app/tests/
 COPY tests/eval_mira.py /app/tests/
+COPY tests/eval_voice.py /app/tests/
+COPY tests/test_speech_timing.py /app/tests/
+COPY tests/test_pipeline_smoothness.py /app/tests/
+COPY tests/test_vad_and_speech_detection.py /app/tests/
+COPY tests/test_tts_audio_quality.py /app/tests/
 COPY tests/run_all_tests.py /app/tests/
 
 # Copy pyproject.toml for pytest config (asyncio_mode = "auto")

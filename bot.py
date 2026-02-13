@@ -62,6 +62,7 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.interruptions.min_words_interruption_strategy import MinWordsInterruptionStrategy
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -328,6 +329,14 @@ class PipelineInstrumentor(FrameProcessor):
 
         # TTS: Started generating
         elif isinstance(frame, TTSStartedFrame):
+            # Track gap between consecutive TTS sentences
+            if self._tts_stopped_at > 0:
+                inter_sentence_gap = self._ms(self._tts_stopped_at, now)
+                if inter_sentence_gap > 0:
+                    logger.info(
+                        f"[SMOOTH] Inter-sentence gap: {inter_sentence_gap:.0f}ms "
+                        f"(TTS-stop → TTS-start)"
+                    )
             self._tts_started_at = now
             llm_to_tts = self._ms(self._llm_first_token_at, now)
             logger.info(f"[METRICS] TTS STARTED  (LLM-first-token → TTS-start: {llm_to_tts:.0f}ms)")
@@ -1196,6 +1205,12 @@ VAD_START_SECS = float(os.getenv("VAD_START_SECS", "0.2"))
 VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "1.0"))
 VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.4"))
 
+# Minimum words the user must speak before a barge-in interruption fires.
+# Prevents false barge-in from acoustic echo (bot audio leaking into mic),
+# especially on mobile devices without hardware echo cancellation.
+# Set to 0 to disable (immediate interruption on any speech).
+INTERRUPTION_MIN_WORDS = int(os.getenv("INTERRUPTION_MIN_WORDS", "2"))
+
 # Prompt configuration
 PROMPT_DIR = os.getenv("PROMPT_DIR", os.path.join(os.path.dirname(__file__), "prompts"))
 PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v4")
@@ -1619,12 +1634,25 @@ async def create_bot_pipeline(
         ])
 
     # Create task and runner
+    # Build interruption strategies: require minimum words before barge-in
+    # to prevent false interruptions from acoustic echo on mobile devices.
+    interruption_strategies = []
+    if INTERRUPTION_MIN_WORDS > 0:
+        interruption_strategies.append(
+            MinWordsInterruptionStrategy(min_words=INTERRUPTION_MIN_WORDS)
+        )
+        logger.info(
+            f"[PIPELINE] Interruption guard: require {INTERRUPTION_MIN_WORDS} words "
+            f"before barge-in (prevents echo false-positives)"
+        )
+
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
             enable_metrics=True,
             enable_usage_metrics=True,
+            interruption_strategies=interruption_strategies,
         ),
     )
 

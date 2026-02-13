@@ -14,3 +14,6 @@ fastapi>=0.110.0
 elevenlabs>=1.0.0
 httpx>=0.25.0
 PyJWT>=2.9.0
+# Voice eval: generate student audio from text prompts
+gTTS>=2.5.0
+pydub>=0.25.0

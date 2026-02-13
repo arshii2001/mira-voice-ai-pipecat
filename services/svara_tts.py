@@ -18,10 +18,12 @@ Server endpoints:
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, List, Optional
 
 import aiohttp
+import numpy as np
 import websockets
 from websockets.asyncio.client import connect as websocket_connect
 
@@ -43,6 +45,27 @@ logger = logging.getLogger(__name__)
 
 # WAV header size (44 bytes standard)
 WAV_HEADER_SIZE = 44
+
+# ---------------------------------------------------------------------------
+# Text chunking for Svara long-form generation.
+# Adapted from Sarvam's official svara-longform-generation notebook.
+# Splits on clause/sentence boundaries with target/max/min size guards
+# and merges tiny tail fragments.
+# ---------------------------------------------------------------------------
+_CLAUSE_SPLIT_RE = re.compile(r'(?<=[,.!?;:।؟\n])\s+')
+
+# Chunk size parameters (characters).  Svara's max_tokens=350 generates
+# at most ~4s of audio.  target=150 keeps most chunks in the 2-3s sweet
+# spot; max=200 is the hard ceiling; min=50 prevents tiny fragments that
+# produce pops or awkward prosody.
+_CHUNK_TARGET = 120
+_CHUNK_MAX = 200
+_CHUNK_MIN = 50
+
+# Crossfade duration in seconds between consecutive TTS chunks.
+# Eliminates click/pop artifacts at chunk boundaries.
+# Sarvam notebook uses 0.035-0.055s; we use 0.04s as a safe middle.
+_CROSSFADE_SEC = 0.04
 
 
 @dataclass
@@ -210,14 +233,223 @@ class SvaraTTSService(TTSService):
             "X-API-Key": key,
         }
 
+    @staticmethod
+    def _chunk_text(
+        text: str,
+        target_size: int = _CHUNK_TARGET,
+        max_size: int = _CHUNK_MAX,
+        min_size: int = _CHUNK_MIN,
+    ) -> List[str]:
+        """Split text into TTS-friendly chunks using Sarvam's proven algorithm.
+
+        Adapted from the official svara-longform-generation notebook.
+        Splits on clause/sentence boundaries (,.!?;:।) with:
+          - target_size: soft stop — start a new chunk once buffer hits this
+          - max_size: hard stop — never exceed this per chunk
+          - min_size: merge tiny tail fragments back into the previous chunk
+
+        Returns a list of text chunks ready for individual Svara TTS calls.
+        """
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if len(text) <= target_size:
+            return [text]
+
+        parts = _CLAUSE_SPLIT_RE.split(text)
+
+        chunks: List[str] = []
+        buffer = ""
+
+        for part in parts:
+            if not part:
+                continue
+
+            if not buffer:
+                buffer = part
+                continue
+
+            projected_len = len(buffer) + 1 + len(part)
+
+            # Hard stop — never exceed max_size
+            if projected_len > max_size:
+                chunks.append(buffer)
+                buffer = part
+                continue
+
+            # Soft stop — start new chunk once we hit target
+            if len(buffer) >= target_size:
+                chunks.append(buffer)
+                buffer = part
+                continue
+
+            buffer += " " + part
+
+        if buffer:
+            chunks.append(buffer)
+
+        # Merge tiny tail chunks back into the previous one
+        final: List[str] = []
+        for c in chunks:
+            if final and len(c) < min_size and len(final[-1]) + 1 + len(c) <= max_size:
+                final[-1] += " " + c
+            else:
+                final.append(c)
+
+        if len(final) > 1:
+            logger.info(
+                f"TTS text chunked: {len(text)} chars → {len(final)} chunks "
+                f"({[len(c) for c in final]})"
+            )
+        return final
+
+    @staticmethod
+    def _crossfade_pcm(
+        a: bytes, b: bytes, fade_sec: float = _CROSSFADE_SEC, sample_rate: int = 24000
+    ) -> bytes:
+        """Crossfade two PCM16 audio buffers to eliminate click/pop artifacts.
+
+        Uses a cosine crossfade (same as Sarvam's notebook) at the boundary
+        between consecutive TTS chunks.
+
+        Args:
+            a: First PCM16 audio buffer (little-endian signed 16-bit)
+            b: Second PCM16 audio buffer
+            fade_sec: Duration of the crossfade in seconds
+            sample_rate: Audio sample rate
+
+        Returns:
+            Combined PCM16 audio with smooth crossfade at the join point.
+        """
+        if not a or not b:
+            return a + b
+
+        fade_samples = int(fade_sec * sample_rate)
+
+        # Convert PCM16 bytes → float arrays
+        a_arr = np.frombuffer(a, dtype=np.int16).astype(np.float32)
+        b_arr = np.frombuffer(b, dtype=np.int16).astype(np.float32)
+
+        fade_samples = min(fade_samples, len(a_arr), len(b_arr))
+        if fade_samples < 2:
+            # Too short to crossfade — just concatenate
+            return a + b
+
+        # Cosine crossfade (same as Sarvam notebook)
+        t = np.linspace(0, 1, fade_samples, endpoint=False)
+        fade_out = np.cos(t * np.pi / 2)
+        fade_in = np.sin(t * np.pi / 2)
+
+        cross = a_arr[-fade_samples:] * fade_out + b_arr[:fade_samples] * fade_in
+
+        result = np.concatenate([
+            a_arr[:-fade_samples],
+            cross,
+            b_arr[fade_samples:],
+        ])
+
+        # Clip and convert back to PCM16
+        result = np.clip(result, -32768, 32767).astype(np.int16)
+        return result.tobytes()
+
+    @staticmethod
+    def _apply_fade_edges(
+        pcm: bytes, fade_sec: float = _CROSSFADE_SEC, sample_rate: int = 24000
+    ) -> bytes:
+        """Apply fade-in at start and fade-out at end of PCM16 audio.
+
+        This ensures each sentence's audio starts and ends at zero amplitude,
+        eliminating click/pop artifacts when Pipecat concatenates consecutive
+        sentences (each from a separate run_tts call).
+
+        Uses cosine fade curves (same as Sarvam's notebook).
+        """
+        if not pcm or len(pcm) < 4:
+            return pcm
+
+        arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        fade_samples = int(fade_sec * sample_rate)
+        fade_samples = min(fade_samples, len(arr) // 4)  # Don't fade more than 25%
+
+        if fade_samples < 2:
+            return pcm
+
+        # Fade-in: 0 → 1 (sine curve)
+        t_in = np.linspace(0, 1, fade_samples, endpoint=False)
+        arr[:fade_samples] *= np.sin(t_in * np.pi / 2)
+
+        # Fade-out: 1 → 0 (cosine curve)
+        t_out = np.linspace(0, 1, fade_samples, endpoint=False)
+        arr[-fade_samples:] *= np.cos(t_out * np.pi / 2)
+
+        arr = np.clip(arr, -32768, 32767).astype(np.int16)
+        return arr.tobytes()
+
+    @staticmethod
+    def _apply_fade_in(
+        pcm: bytes, fade_sec: float = _CROSSFADE_SEC, sample_rate: int = 24000
+    ) -> bytes:
+        """Apply fade-in only to the start of PCM16 audio (for streaming)."""
+        if not pcm or len(pcm) < 4:
+            return pcm
+        arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        fade_samples = int(fade_sec * sample_rate)
+        fade_samples = min(fade_samples, len(arr) // 2)
+        if fade_samples < 2:
+            return pcm
+        t = np.linspace(0, 1, fade_samples, endpoint=False)
+        arr[:fade_samples] *= np.sin(t * np.pi / 2)
+        return np.clip(arr, -32768, 32767).astype(np.int16).tobytes()
+
+    @staticmethod
+    def _apply_fade_out(
+        pcm: bytes, fade_sec: float = _CROSSFADE_SEC, sample_rate: int = 24000
+    ) -> bytes:
+        """Apply fade-out only to the end of PCM16 audio (for streaming)."""
+        if not pcm or len(pcm) < 4:
+            return pcm
+        arr = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        fade_samples = int(fade_sec * sample_rate)
+        fade_samples = min(fade_samples, len(arr) // 2)
+        if fade_samples < 2:
+            return pcm
+        t = np.linspace(0, 1, fade_samples, endpoint=False)
+        arr[-fade_samples:] *= np.cos(t * np.pi / 2)
+        return np.clip(arr, -32768, 32767).astype(np.int16).tobytes()
+
+    async def _collect_chunk_audio(self, text_chunk: str) -> bytes:
+        """Synthesize a single text chunk and collect all PCM audio bytes."""
+        pcm_bytes = b""
+        if self._streaming:
+            async for frame in self._run_streaming_tts_websocket(text_chunk):
+                if self._interrupted:
+                    break
+                if isinstance(frame, TTSAudioRawFrame):
+                    pcm_bytes += frame.audio
+        else:
+            async for frame in self._run_non_streaming_tts(text_chunk):
+                if self._interrupted:
+                    break
+                if isinstance(frame, TTSAudioRawFrame):
+                    pcm_bytes += frame.audio
+        return pcm_bytes
+
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
         """
         Synthesize text to speech with barge-in support.
 
         This is the core method required by TTSService base class.
-        Pipecat's sentence aggregator calls this once per sentence
-        (not once per full LLM response), so each call is already
-        a single sentence within Svara's ~350 token limit.
+        Pipecat's sentence aggregator usually calls this once per sentence,
+        but may flush multiple sentences as one block when the LLM streams
+        fast.  We chunk long text using Sarvam's proven algorithm and
+        crossfade between chunks to eliminate pop/click artifacts.
+
+        STREAMING STRATEGY:
+        - Single chunk (most common): Stream audio as it arrives from Svara.
+          Apply fade-in to the very first audio fragment, and fade-out to
+          the last fragment, so each sentence starts/ends at zero amplitude.
+          This gives near-instant first audio byte instead of waiting for
+          the entire sentence to be synthesized.
+        - Multi-chunk (long text): Collect + crossfade per chunk, then emit.
 
         Args:
             text: Text to synthesize
@@ -236,29 +468,165 @@ class SvaraTTSService(TTSService):
         if not self._session:
             self._session = aiohttp.ClientSession()
 
-        logger.info(f"TTS INPUT TEXT ({len(text)} chars): '{text}' [voice={self._config.voice}]")
+        # Chunk text using Sarvam's proven algorithm
+        chunks = self._chunk_text(text)
+        multi_chunk = len(chunks) > 1
 
-        # Reset interrupted flag at start of new generation
+        if not multi_chunk:
+            # Single chunk — STREAM audio as it arrives from Svara.
+            # Apply fade-in to the first audio bytes and fade-out to the last.
+            import time as _time
+            t_tts_start = _time.monotonic()
+            logger.info(
+                f"[SMOOTH] TTS start ({len(text)} chars): "
+                f"'{text[:80]}{'...' if len(text) > 80 else ''}' "
+                f"[voice={self._config.voice}]"
+            )
+            self._interrupted = False
+            self._generating = True
+            yield TTSStartedFrame()
+
+            sr = self._sample_rate or 24000
+            fade_samples = int(_CROSSFADE_SEC * sr)
+            # We need fade_samples * 2 bytes (16-bit PCM) for fade-in
+            fade_bytes = fade_samples * 2
+            emit_chunk_size = 4096  # Transport chunk size
+
+            first_chunk_emitted = False
+            pending_tail = b""  # Buffer last fade_bytes for fade-out
+
+            try:
+                if self._streaming:
+                    gen = self._run_streaming_tts_websocket(text)
+                else:
+                    gen = self._run_non_streaming_tts(text)
+
+                async for frame in gen:
+                    if self._interrupted:
+                        break
+                    if not isinstance(frame, TTSAudioRawFrame):
+                        continue
+
+                    pcm = frame.audio
+                    if not pcm:
+                        continue
+
+                    if not first_chunk_emitted:
+                        # Apply fade-in to the very first audio bytes
+                        pcm = self._apply_fade_in(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+                        first_chunk_emitted = True
+                        ttfb_ms = (_time.monotonic() - t_tts_start) * 1000
+                        logger.info(
+                            f"[SMOOTH] TTS first audio byte at {ttfb_ms:.0f}ms "
+                            f"({len(pcm)} bytes)"
+                        )
+
+                    # Buffer the tail for fade-out application later
+                    combined = pending_tail + pcm
+                    if len(combined) > fade_bytes:
+                        # Emit everything except the tail buffer
+                        to_emit = combined[:-fade_bytes]
+                        pending_tail = combined[-fade_bytes:]
+
+                        for i in range(0, len(to_emit), emit_chunk_size):
+                            if self._interrupted:
+                                break
+                            yield TTSAudioRawFrame(
+                                audio=to_emit[i:i + emit_chunk_size],
+                                sample_rate=sr,
+                                num_channels=1,
+                            )
+                    else:
+                        pending_tail = combined
+
+                # Flush the tail with fade-out applied
+                if pending_tail and not self._interrupted:
+                    pending_tail = self._apply_fade_out(
+                        pending_tail, fade_sec=_CROSSFADE_SEC, sample_rate=sr
+                    )
+                    for i in range(0, len(pending_tail), emit_chunk_size):
+                        if self._interrupted:
+                            break
+                        yield TTSAudioRawFrame(
+                            audio=pending_tail[i:i + emit_chunk_size],
+                            sample_rate=sr,
+                            num_channels=1,
+                        )
+
+                total_ms = (_time.monotonic() - t_tts_start) * 1000
+                logger.info(
+                    f"[SMOOTH] TTS complete in {total_ms:.0f}ms "
+                    f"(first byte at {ttfb_ms:.0f}ms)" if first_chunk_emitted
+                    else f"[SMOOTH] TTS complete in {total_ms:.0f}ms (no audio)"
+                )
+
+            except asyncio.CancelledError:
+                logger.info("Svara TTS generation cancelled")
+                raise
+            except Exception as e:
+                logger.error(f"Svara TTS error: {e}")
+                yield ErrorFrame(f"Svara TTS error: {e}")
+            finally:
+                self._generating = False
+                self._current_websocket = None
+                yield TTSStoppedFrame()
+            return
+
+        # Multi-chunk path: collect audio per chunk, crossfade, then emit
+        logger.info(
+            f"TTS multi-chunk: {len(text)} chars → {len(chunks)} chunks "
+            f"({[len(c) for c in chunks]})"
+        )
+
         self._interrupted = False
         self._generating = True
-
-        # Signal TTS started
         yield TTSStartedFrame()
 
         try:
-            if self._streaming:
-                async for frame in self._run_streaming_tts_websocket(text):
-                    # Check for interruption between chunks
+            combined_pcm = b""
+
+            for i, chunk in enumerate(chunks):
+                if self._interrupted:
+                    logger.info(f"TTS skipped chunk {i+1}/{len(chunks)} - interrupted")
+                    break
+
+                logger.info(
+                    f"TTS INPUT TEXT ({len(chunk)} chars, chunk {i+1}/{len(chunks)}): "
+                    f"'{chunk[:60]}{'...' if len(chunk) > 60 else ''}' "
+                    f"[voice={self._config.voice}]"
+                )
+
+                chunk_pcm = await self._collect_chunk_audio(chunk)
+
+                if not chunk_pcm:
+                    continue
+
+                if combined_pcm:
+                    # Crossfade with previous chunk to eliminate pops
+                    combined_pcm = self._crossfade_pcm(
+                        combined_pcm, chunk_pcm,
+                        fade_sec=_CROSSFADE_SEC,
+                        sample_rate=self._sample_rate or 24000,
+                    )
+                else:
+                    combined_pcm = chunk_pcm
+
+            # Apply fade edges to the combined audio, then emit as chunks
+            if combined_pcm:
+                combined_pcm = self._apply_fade_edges(
+                    combined_pcm,
+                    fade_sec=_CROSSFADE_SEC,
+                    sample_rate=self._sample_rate or 24000,
+                )
+                chunk_size = 4096
+                for i in range(0, len(combined_pcm), chunk_size):
                     if self._interrupted:
-                        logger.info("TTS interrupted during streaming - stopping")
                         break
-                    yield frame
-            else:
-                async for frame in self._run_non_streaming_tts(text):
-                    if self._interrupted:
-                        logger.info("TTS interrupted during output - stopping")
-                        break
-                    yield frame
+                    yield TTSAudioRawFrame(
+                        audio=combined_pcm[i:i + chunk_size],
+                        sample_rate=self._sample_rate or 24000,
+                        num_channels=1,
+                    )
 
         except asyncio.CancelledError:
             logger.info("Svara TTS generation cancelled")
@@ -269,11 +637,12 @@ class SvaraTTSService(TTSService):
         finally:
             self._generating = False
             self._current_websocket = None
-            # Signal TTS stopped
             yield TTSStoppedFrame()
 
     async def _run_streaming_tts_websocket(self, text: str) -> AsyncGenerator[Frame, None]:
         """Run streaming TTS via WebSocket with interruption support."""
+        import time as _time
+        t0 = _time.monotonic()
         ws_url = f"{self._ws_url}/v1/audio/text-to-speech/stream"
 
         # Svara HTTP APIs use "prompt"; some WS deployments mirror that schema.
@@ -305,6 +674,8 @@ class SvaraTTSService(TTSService):
                 ping_timeout=20,
                 additional_headers=extra_headers,
             )
+            connect_ms = (_time.monotonic() - t0) * 1000
+            logger.info(f"[SMOOTH] Svara WS connect: {connect_ms:.0f}ms")
 
             # Send config
             await self._current_websocket.send(json.dumps(config))
@@ -319,10 +690,17 @@ class SvaraTTSService(TTSService):
             if ack_data.get("type") != "config_ack":
                 raise RuntimeError(f"Unexpected response: {ack_data}")
 
-            logger.debug(f"TTS WebSocket connected, session: {ack_data.get('session_id', 'N/A')}")
+            ack_ms = (_time.monotonic() - t0) * 1000
+            logger.info(
+                f"[SMOOTH] Svara WS ready: {ack_ms:.0f}ms "
+                f"(connect={connect_ms:.0f}ms + ack={ack_ms - connect_ms:.0f}ms)"
+            )
 
             # Receive audio chunks
             header_stripped = False
+            first_audio = True
+            audio_chunks_received = 0
+            total_audio_bytes = 0
             while True:
                 if self._interrupted:
                     logger.info("TTS WebSocket interrupted - closing")
@@ -342,6 +720,15 @@ class SvaraTTSService(TTSService):
                             header_stripped = True
 
                         if chunk:
+                            audio_chunks_received += 1
+                            total_audio_bytes += len(chunk)
+                            if first_audio:
+                                first_audio = False
+                                first_byte_ms = (_time.monotonic() - t0) * 1000
+                                logger.info(
+                                    f"[SMOOTH] Svara first audio chunk: {first_byte_ms:.0f}ms "
+                                    f"({len(chunk)} bytes)"
+                                )
                             yield TTSAudioRawFrame(
                                 audio=chunk,
                                 sample_rate=self._sample_rate,
@@ -354,11 +741,12 @@ class SvaraTTSService(TTSService):
 
                         if msg_type == "done":
                             audio_dur = data.get('audio_duration', 0)
+                            total_ms = (_time.monotonic() - t0) * 1000
                             logger.info(
-                                f"TTS done: text_len={len(text)} chars, "
-                                f"audio_duration={audio_dur:.2f}s, "
-                                f"max_tokens={self._config.max_tokens}, "
-                                f"voice={self._config.voice}"
+                                f"[SMOOTH] Svara TTS done: {total_ms:.0f}ms total | "
+                                f"text={len(text)}chars | audio={audio_dur:.2f}s | "
+                                f"{audio_chunks_received} chunks | "
+                                f"{total_audio_bytes}B | voice={self._config.voice}"
                             )
                             break
                         elif msg_type == "error":

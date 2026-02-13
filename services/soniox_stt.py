@@ -179,7 +179,16 @@ class SonioxSTTService(FrameProcessor):
         self._interrupted = False
         self._muted = False
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._idle_keepalive_task: Optional[asyncio.Task] = None
         self._pipeline_stopped = False
+        self._first_speech_received = False  # True after first UserStartedSpeakingFrame
+        self._pipeline_start_time: float = 0.0  # monotonic time when pipeline started
+
+        # Reconnect audio buffer — holds audio frames received while Soniox
+        # is reconnecting, so initial words are not lost.
+        self._reconnect_buffer: list[bytes] = []
+        _MAX_RECONNECT_BUFFER = 50  # ~1s of audio at 20ms chunks
+        self._MAX_RECONNECT_BUFFER = _MAX_RECONNECT_BUFFER
 
         # Clarity scoring state — tracks per-utterance quality signals
         self._speech_start_time: float = 0.0  # monotonic time when user started speaking
@@ -356,15 +365,28 @@ class SonioxSTTService(FrameProcessor):
 
     async def start(self, frame: StartFrame):
         """Start the STT service. Connect eagerly for lower first-turn latency."""
-        logger.info("Soniox STT service started (eager connection mode)")
+        self._pipeline_start_time = time.monotonic()
+        logger.info("[SONIOX_TIMING] Pipeline START — connecting eagerly")
+        t0 = time.monotonic()
         try:
             await self._connect()
+            connect_ms = (time.monotonic() - t0) * 1000
+            logger.info(f"[SONIOX_TIMING] Eager connect completed in {connect_ms:.0f}ms")
+            # Start idle keepalive to prevent Soniox from dropping the
+            # connection before the user speaks (tutor mode has no greeting,
+            # so no audio flows until the user presses mic).
+            self._idle_keepalive_task = asyncio.create_task(self._idle_keepalive_loop())
+            logger.info("[SONIOX_TIMING] Idle keepalive started (pings every 5s until first speech)")
         except Exception as e:
             logger.warning(f"Eager Soniox connect failed, will retry on first speech: {e}")
 
     async def stop(self, frame: EndFrame):
         """Stop the STT service and close connection."""
         self._pipeline_stopped = True
+        # Cancel idle keepalive if still running
+        if self._idle_keepalive_task and not self._idle_keepalive_task.done():
+            self._idle_keepalive_task.cancel()
+            self._idle_keepalive_task = None
         await self._disconnect()
 
     async def cancel(self, frame: CancelFrame):
@@ -703,8 +725,15 @@ class SonioxSTTService(FrameProcessor):
                 self._detected_language = None
                 self._last_logged_raw_language = None
         elif not self._muted and self._config.include_nonfinal:
-            # Interim result
-            logger.debug(f"Soniox interim: {formatted_text[:50]}...")
+            # Interim result — log first interim for timing
+            if not self._current_text and self._speech_start_time:
+                since_speech = (time.monotonic() - self._speech_start_time) * 1000
+                logger.info(
+                    f"[SONIOX_TIMING] First interim transcript {since_speech:.0f}ms "
+                    f"after speech start: '{formatted_text[:60]}'"
+                )
+            else:
+                logger.debug(f"Soniox interim: {formatted_text[:50]}...")
             self._current_text = formatted_text
 
             await self.push_frame(
@@ -771,16 +800,71 @@ class SonioxSTTService(FrameProcessor):
             # Reset per-utterance language state to avoid stale carry-over.
             self._detected_language = None
             self._last_logged_raw_language = None
+
+            idle_sec = time.monotonic() - self._pipeline_start_time
+            is_first = not self._first_speech_received
+
+            # Cancel idle keepalive — real audio is about to flow
+            if is_first:
+                self._first_speech_received = True
+                if self._idle_keepalive_task and not self._idle_keepalive_task.done():
+                    self._idle_keepalive_task.cancel()
+                    self._idle_keepalive_task = None
+                logger.info(
+                    f"[SONIOX_TIMING] First speech after {idle_sec:.1f}s idle | "
+                    f"connected={self._connected} | "
+                    f"idle_keepalive_cancelled=True"
+                )
+            else:
+                logger.info(
+                    f"[SONIOX_TIMING] User speaking (turn) | "
+                    f"connected={self._connected}"
+                )
+
+            # Clear any stale reconnect buffer from a previous utterance
+            self._reconnect_buffer.clear()
+
             # Reconnect if not connected. The _receive_messages loop may have
             # exited due to idle timeout, so check if the task is done too.
             receive_task_dead = (
                 self._receive_task is None or self._receive_task.done()
             )
             if not self._connected and receive_task_dead:
-                logger.info("User started speaking - connecting to Soniox")
+                logger.warning(
+                    f"[SONIOX_TIMING] ⚠️  Soniox NOT connected on speech start "
+                    f"(idle {idle_sec:.1f}s) — reconnecting..."
+                )
+                t0 = time.monotonic()
                 await self._connect()
+                reconnect_ms = (time.monotonic() - t0) * 1000
+                logger.info(
+                    f"[SONIOX_TIMING] Reconnect completed in {reconnect_ms:.0f}ms"
+                )
+                # Flush any audio that was buffered during reconnection
+                if self._reconnect_buffer and self._connected and self._websocket:
+                    buf_bytes = sum(len(b) for b in self._reconnect_buffer)
+                    buf_ms = buf_bytes / (self._config.sample_rate * 2) * 1000
+                    logger.info(
+                        f"[SONIOX_TIMING] Flushing {len(self._reconnect_buffer)} buffered frames "
+                        f"({buf_bytes} bytes ≈ {buf_ms:.0f}ms audio) to Soniox"
+                    )
+                    ws = self._websocket
+                    for buffered_audio in self._reconnect_buffer:
+                        try:
+                            await ws.send(buffered_audio)
+                        except Exception as e:
+                            logger.warning(f"Failed to flush buffered audio: {e}")
+                            break
+                    self._reconnect_buffer.clear()
             elif not self._connected:
-                logger.info("User started speaking but Soniox reconnecting — audio may be dropped briefly")
+                logger.warning(
+                    "[SONIOX_TIMING] ⚠️  Soniox reconnecting — audio will be buffered"
+                )
+            else:
+                logger.info(
+                    f"[SONIOX_TIMING] ✅ Soniox already connected — "
+                    f"audio flows immediately (idle {idle_sec:.1f}s)"
+                )
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
@@ -817,12 +901,27 @@ class SonioxSTTService(FrameProcessor):
     async def _process_audio(self, frame: InputAudioRawFrame):
         """Process audio frame and send to Soniox.
 
-        If the connection is dead, silently drops audio. The _receive_messages
-        loop is solely responsible for reconnection to avoid race conditions.
+        If the connection is dead and the user is speaking, buffer the audio
+        so it can be flushed once Soniox reconnects (prevents initial word loss).
+        If idle, silently drop the frame.
         """
         ws = self._websocket  # Local ref to avoid races
         if not self._connected or ws is None:
-            # _receive_messages will reconnect; just drop this frame
+            # Buffer audio during reconnection so initial words aren't lost
+            if self._user_speaking and len(self._reconnect_buffer) < self._MAX_RECONNECT_BUFFER:
+                audio = frame.audio
+                if isinstance(audio, np.ndarray):
+                    if audio.dtype == np.float32 or audio.dtype == np.float64:
+                        audio = (audio * 32767).astype(np.int16)
+                    elif audio.dtype != np.int16:
+                        audio = audio.astype(np.int16)
+                    audio = audio.tobytes()
+                if isinstance(audio, bytes):
+                    self._reconnect_buffer.append(audio)
+                    logger.debug(
+                        f"Buffered audio frame during reconnect "
+                        f"({len(self._reconnect_buffer)}/{self._MAX_RECONNECT_BUFFER})"
+                    )
             return
 
         try:
@@ -843,8 +942,20 @@ class SonioxSTTService(FrameProcessor):
 
             # Send audio to Soniox
             await ws.send(audio_bytes)
+            prev_sent = self._audio_bytes_sent
             self._audio_bytes_sent += len(audio_bytes)
-            logger.debug(f"Sent {len(audio_bytes)} bytes of audio to Soniox")
+            # Log first audio frame of each utterance for timing analysis
+            if prev_sent == 0:
+                since_speech = (time.monotonic() - self._speech_start_time) * 1000
+                since_pipeline = (time.monotonic() - self._pipeline_start_time) * 1000 if self._pipeline_start_time else 0
+                logger.info(
+                    f"[SONIOX_TIMING] ✅ First audio frame sent to STT | "
+                    f"{since_speech:.0f}ms after VAD trigger | "
+                    f"{since_pipeline:.0f}ms after pipeline start | "
+                    f"{len(audio_bytes)} bytes"
+                )
+            else:
+                logger.debug(f"Sent {len(audio_bytes)} bytes of audio to Soniox")
 
         except websockets.ConnectionClosed:
             logger.warning("Soniox connection closed during audio send — _receive_messages will reconnect")
@@ -880,3 +991,53 @@ class SonioxSTTService(FrameProcessor):
                     # Don't break — transient errors shouldn't kill keepalive
         except asyncio.CancelledError:
             pass
+
+    async def _idle_keepalive_loop(self):
+        """Send periodic silence to keep Soniox alive BEFORE the user speaks.
+
+        In tutor mode (no greeting), the Soniox connection is opened eagerly
+        but no audio flows until the user presses the mic and starts talking.
+        Soniox's server drops idle connections after ~30s, so we send a tiny
+        silence ping every 5s to keep it alive.
+
+        This loop runs from start() until the first UserStartedSpeakingFrame,
+        at which point real audio takes over and this loop is cancelled.
+        """
+        silence_samples = int(0.1 * self._config.sample_rate)  # 100ms of silence
+        silence = np.zeros(silence_samples, dtype=np.int16)
+        silence_bytes = silence.tobytes()
+
+        ping_count = 0
+        try:
+            while not self._first_speech_received and not self._pipeline_stopped:
+                await asyncio.sleep(5.0)  # Ping every 5 seconds
+                ws = self._websocket
+                if self._connected and ws is not None:
+                    try:
+                        await ws.send(silence_bytes)
+                        ping_count += 1
+                        idle_sec = time.monotonic() - self._pipeline_start_time
+                        logger.info(
+                            f"[SONIOX_TIMING] Idle keepalive ping #{ping_count} "
+                            f"({idle_sec:.1f}s since start) — Soniox alive ✅"
+                        )
+                    except websockets.ConnectionClosed:
+                        logger.warning(
+                            f"[SONIOX_TIMING] ⚠️  Idle keepalive: Soniox dropped connection "
+                            f"after {ping_count} pings"
+                        )
+                        self._connected = False
+                        self._websocket = None
+                        break
+                    except Exception as e:
+                        logger.warning(f"Soniox idle keepalive error: {e}")
+                elif not self._connected:
+                    logger.warning(
+                        "[SONIOX_TIMING] ⚠️  Idle keepalive: not connected, cannot ping"
+                    )
+        except asyncio.CancelledError:
+            idle_sec = time.monotonic() - self._pipeline_start_time
+            logger.info(
+                f"[SONIOX_TIMING] Idle keepalive ended after {ping_count} pings "
+                f"({idle_sec:.1f}s) — user started speaking"
+            )
