@@ -84,7 +84,7 @@ spec:
         - name: acr-iaienterpriseacr
       containers:
         - name: pipecat-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.3
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.4
           imagePullPolicy: Always
           ports:
             - containerPort: 7860
