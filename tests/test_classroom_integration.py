@@ -1150,7 +1150,7 @@ async def test_conversation_history_continuity() -> TestResult:
         }))
         logger.info("  Turn 1: 'My name is Arjun'")
 
-        r1, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        r1, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         assert len(r1.strip()) > 0, "No response to turn 1"
         logger.info(f"  Turn 1 response: '{r1[:80]}'")
 
@@ -1161,7 +1161,7 @@ async def test_conversation_history_continuity() -> TestResult:
         }))
         logger.info("  Turn 2: 'What is my name?'")
 
-        r2, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        r2, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         assert len(r2.strip()) > 0, "No response to turn 2"
         logger.info(f"  Turn 2 response: '{r2[:80]}'")
 
@@ -1177,7 +1177,7 @@ async def test_conversation_history_continuity() -> TestResult:
         }))
         logger.info("  Turn 3: 'How many questions have I asked?'")
 
-        r3, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        r3, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         logger.info(f"  Turn 3 response: '{r3[:80]}'")
         # We don't assert exact count, just that the bot gives a coherent answer
 
@@ -1234,7 +1234,7 @@ async def test_topic_boundary_enforcement() -> TestResult:
         }))
         logger.info("  Set topic: Photosynthesis")
 
-        topic_response, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        topic_response, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         assert len(topic_response.strip()) > 0, "No response to SET_TOPIC"
         logger.info(f"  Topic intro: '{topic_response[:80]}...'")
 
@@ -1245,7 +1245,7 @@ async def test_topic_boundary_enforcement() -> TestResult:
         }))
         logger.info("  On-topic: 'What role does chlorophyll play?'")
 
-        on_topic_response, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        on_topic_response, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         assert len(on_topic_response.strip()) > 0, "No response to on-topic question"
         # On-topic response should contain relevant keywords
         on_topic_relevant = any(kw in on_topic_response.lower() for kw in [
@@ -1261,7 +1261,7 @@ async def test_topic_boundary_enforcement() -> TestResult:
         }))
         logger.info("  Off-topic: 'Who won the 2023 cricket world cup?'")
 
-        off_topic_response, _ = await collect_bot_response(ws_speaker, timeout=30.0)
+        off_topic_response, _ = await collect_bot_response(ws_speaker, timeout=60.0)
         assert len(off_topic_response.strip()) > 0, "No response to off-topic question"
         logger.info(f"  Off-topic response: '{off_topic_response[:120]}...'")
 

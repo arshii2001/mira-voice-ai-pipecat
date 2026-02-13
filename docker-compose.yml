@@ -167,6 +167,65 @@ services:
       - test
 
   # ============================================
+  # Text-Audio Sync Soak Test (30-minute drift test)
+  # Run with: docker compose run --rm soak-test-oss
+  # Quick:    docker compose run --rm soak-test-oss --quick
+  # ============================================
+  soak-test-oss:
+    build:
+      context: .
+      dockerfile: soak_test/Dockerfile
+    container_name: mira-soak-test-oss
+    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "oss"]
+    env_file:
+      - .env
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    volumes:
+      - ./soak_test/output:/app/soak_test/output
+    networks:
+      - mira-network
+    profiles:
+      - test
+
+  soak-test-elevenlabs:
+    build:
+      context: .
+      dockerfile: soak_test/Dockerfile
+    container_name: mira-soak-test-elevenlabs
+    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "elevenlabs"]
+    env_file:
+      - .env
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    volumes:
+      - ./soak_test/output:/app/soak_test/output
+    networks:
+      - mira-network
+    profiles:
+      - test
+
+  soak-test-local:
+    build:
+      context: .
+      dockerfile: soak_test/Dockerfile
+    container_name: mira-soak-test-local
+    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "local"]
+    env_file:
+      - .env
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    volumes:
+      - ./soak_test/output:/app/soak_test/output
+    networks:
+      - mira-network
+    depends_on:
+      mira-voice:
+        condition: service_healthy
+    profiles:
+      - test
+
+  # ============================================
   # Cypress E2E UI Tests
   # Run with: docker compose run --rm test-ui
   # Or:       docker compose run --rm test-ui --spec "cypress/e2e/classroom_teacher.cy.ts"
