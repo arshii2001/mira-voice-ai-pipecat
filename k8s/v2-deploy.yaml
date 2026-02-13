@@ -43,6 +43,8 @@ data:
   WEBUI_AUTH: "true"
   ENABLE_SIGNUP: "false"
   ENABLE_PERSISTENT_CONFIG: "false"
+  SHOW_ADMIN_DETAILS: "false"
+  ENABLE_UPDATE_CHECK: "false"
 
 ---
 # ── OpenWebUI v2 PVC ────────────────────────────────────────
@@ -196,23 +198,7 @@ spec:
                 configMapKeyRef:
                   name: pipecat-v2-config
                   key: CURRICULUM_CONTEXT_MAX_TOKENS
-            # ── API Key Secrets ──
-            - name: SONIOX_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mira-voice-secrets
-                  key: SONIOX_API_KEY
-            - name: LLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mira-voice-secrets
-                  key: LLM_API_KEY
-            - name: ELEVENLABS_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mira-voice-secrets
-                  key: ELEVENLABS_API_KEY
-            # Shared JWT secret with OpenWebUI
+            # ── Shared JWT secret with OpenWebUI ──
             - name: WEBUI_SECRET_KEY
               valueFrom:
                 secretKeyRef:
@@ -359,6 +345,16 @@ spec:
                 configMapKeyRef:
                   name: openwebui-v2-config
                   key: ENABLE_PERSISTENT_CONFIG
+            - name: SHOW_ADMIN_DETAILS
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: SHOW_ADMIN_DETAILS
+            - name: ENABLE_UPDATE_CHECK
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v2-config
+                  key: ENABLE_UPDATE_CHECK
             # Shared JWT secret with Pipecat — must match WEBUI_SECRET_KEY above
             - name: WEBUI_SECRET_KEY
               valueFrom:

@@ -44,6 +44,8 @@ data:
   WEBUI_AUTH: "true"
   ENABLE_SIGNUP: "false"
   ENABLE_PERSISTENT_CONFIG: "false"
+  SHOW_ADMIN_DETAILS: "false"
+  ENABLE_UPDATE_CHECK: "false"
 
 ---
 # ── OpenWebUI v4-oss PVC ─────────────────────────────────────
@@ -268,6 +270,16 @@ spec:
                 configMapKeyRef:
                   name: openwebui-v4-oss-config
                   key: ENABLE_PERSISTENT_CONFIG
+            - name: SHOW_ADMIN_DETAILS
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v4-oss-config
+                  key: SHOW_ADMIN_DETAILS
+            - name: ENABLE_UPDATE_CHECK
+              valueFrom:
+                configMapKeyRef:
+                  name: openwebui-v4-oss-config
+                  key: ENABLE_UPDATE_CHECK
             # Shared JWT secret with Pipecat
             - name: WEBUI_SECRET_KEY
               valueFrom:
