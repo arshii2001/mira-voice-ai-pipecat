@@ -169,6 +169,7 @@ class SonioxSTTService(FrameProcessor):
         self._interrupted = False
         self._muted = False
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._pipeline_stopped = False
 
     @staticmethod
     def _normalize_lang_code(lang: Optional[str]) -> Optional[str]:
@@ -276,6 +277,7 @@ class SonioxSTTService(FrameProcessor):
 
     async def stop(self, frame: EndFrame):
         """Stop the STT service and close connection."""
+        self._pipeline_stopped = True
         await self._disconnect()
 
     async def cancel(self, frame: CancelFrame):
@@ -387,7 +389,12 @@ class SonioxSTTService(FrameProcessor):
         """Continuously receive and process messages from Soniox.
 
         Auto-reconnects with exponential backoff (up to 3 retries) when the
-        WebSocket connection drops unexpectedly.
+        WebSocket connection drops **while a user is actively speaking**.
+
+        If the connection drops while idle (no user speaking), we simply mark
+        ourselves as disconnected and exit. The next UserStartedSpeakingFrame
+        will trigger a fresh _connect(). This avoids the constant
+        disconnect/reconnect churn that Soniox's idle timeout causes.
 
         IMPORTANT: This is the ONLY coroutine that should reconnect. Other
         callers (_process_audio, _keepalive_loop) must NOT attempt their own
@@ -395,15 +402,26 @@ class SonioxSTTService(FrameProcessor):
         """
         MAX_RECONNECT_RETRIES = 3
         reconnect_attempt = 0
+        self._pipeline_stopped = False
 
         try:
             while True:
+                if self._pipeline_stopped:
+                    break
+
                 # Grab a local reference to avoid races with other coroutines
                 ws = self._websocket
 
                 if not self._connected or ws is None:
-                    # Connection lost — attempt inline reconnect (don't call
-                    # _reconnect/_disconnect which would cancel this task).
+                    # Connection lost — only reconnect if user is actively
+                    # speaking or bot is speaking (keepalive needed). If idle,
+                    # just exit and let the next speech event re-connect.
+                    if not self._user_speaking and not self._bot_speaking:
+                        logger.info(
+                            "Soniox: connection dropped while idle — will reconnect on next speech"
+                        )
+                        break
+
                     if reconnect_attempt >= MAX_RECONNECT_RETRIES:
                         logger.error(
                             f"Soniox: exhausted {MAX_RECONNECT_RETRIES} reconnect attempts, giving up"
@@ -479,19 +497,20 @@ class SonioxSTTService(FrameProcessor):
                     logger.warning(f"Soniox WebSocket connection closed: {e}")
                     self._connected = False
                     self._websocket = None
-                    # Loop will attempt reconnect on next iteration
+                    # Loop will check user_speaking/bot_speaking on next iteration
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON from Soniox: {e}")
                 except Exception as e:
                     logger.error(f"Error receiving from Soniox: {e}")
                     self._connected = False
                     self._websocket = None
-                    # Loop will attempt reconnect on next iteration
+                    # Loop will check user_speaking/bot_speaking on next iteration
         except asyncio.CancelledError:
             pass
         finally:
             self._connected = False
             self._websocket = None
+            logger.info("Soniox: _receive_messages loop exited")
 
     async def _handle_message(self, data: dict):
         """Handle a message from Soniox server."""
@@ -638,10 +657,13 @@ class SonioxSTTService(FrameProcessor):
             # Reset per-utterance language state to avoid stale carry-over.
             self._detected_language = None
             self._last_logged_raw_language = None
-            # If not connected yet (first time), use _connect(). If a
-            # _receive_task already exists, it owns reconnection.
-            if not self._connected and self._receive_task is None:
-                logger.info("User started speaking - connecting to Soniox (first time)")
+            # Reconnect if not connected. The _receive_messages loop may have
+            # exited due to idle timeout, so check if the task is done too.
+            receive_task_dead = (
+                self._receive_task is None or self._receive_task.done()
+            )
+            if not self._connected and receive_task_dead:
+                logger.info("User started speaking - connecting to Soniox")
                 await self._connect()
             elif not self._connected:
                 logger.info("User started speaking but Soniox reconnecting — audio may be dropped briefly")
