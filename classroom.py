@@ -295,6 +295,60 @@ class MetricsCollector:
     def record_error(self, category: str):
         self.errors[category] = self.errors.get(category, 0) + 1
 
+    def _stt_clarity_snapshot(self) -> dict:
+        """Return STT clarity metrics for the /metrics endpoint."""
+        scores = getattr(self, "_stt_clarity_scores", [])
+        gated = getattr(self, "_stt_clarity_gated", 0)
+        passed = getattr(self, "_stt_clarity_passed", 0)
+        by_lang = getattr(self, "_stt_clarity_by_lang", {})
+        total = gated + passed
+        result = {
+            "total_utterances": total,
+            "gated_count": gated,
+            "passed_count": passed,
+            "gate_rate_pct": round(gated / total * 100, 1) if total > 0 else 0.0,
+        }
+        if scores:
+            sorted_scores = sorted(scores)
+            result["avg_score"] = round(sum(scores) / len(scores), 3)
+            result["p50_score"] = round(sorted_scores[len(sorted_scores) // 2], 3)
+            result["p10_score"] = round(sorted_scores[max(0, len(sorted_scores) // 10)], 3)
+            result["min_score"] = round(sorted_scores[0], 3)
+        # Per-language breakdown
+        lang_summary = {}
+        for lang, lang_scores in by_lang.items():
+            if lang_scores:
+                lang_summary[lang] = {
+                    "count": len(lang_scores),
+                    "avg_score": round(sum(lang_scores) / len(lang_scores), 3),
+                }
+        if lang_summary:
+            result["by_language"] = lang_summary
+        return result
+
+    # ── STT Clarity metrics ──
+
+    def record_stt_clarity(self, score: float, gated: bool, language: str = "en"):
+        """Record an STT clarity score and whether the utterance was gated."""
+        if not hasattr(self, "_stt_clarity_scores"):
+            self._stt_clarity_scores: list[float] = []
+            self._stt_clarity_gated: int = 0
+            self._stt_clarity_passed: int = 0
+            self._stt_clarity_force_passed: int = 0
+            self._stt_clarity_by_lang: Dict[str, list[float]] = {}
+        self._stt_clarity_scores.append(score)
+        if len(self._stt_clarity_scores) > self._max:
+            self._stt_clarity_scores[:] = self._stt_clarity_scores[-self._max:]
+        if gated:
+            self._stt_clarity_gated += 1
+        else:
+            self._stt_clarity_passed += 1
+        # Per-language tracking
+        lang_scores = self._stt_clarity_by_lang.setdefault(language, [])
+        lang_scores.append(score)
+        if len(lang_scores) > self._max:
+            lang_scores[:] = lang_scores[-self._max:]
+
     def session_start(self, mode: str = "classroom"):
         self.active_sessions += 1
         self.total_sessions += 1
@@ -340,6 +394,7 @@ class MetricsCollector:
                 "listener": self.classroom_listener.to_dict(),
             },
             "errors": dict(self.errors),
+            "stt_clarity": self._stt_clarity_snapshot(),
             "recent_sessions": self.session_summaries[-10:],
             "traces": self.traces[-20:],  # Last 20 per-call traces
         }
@@ -362,6 +417,7 @@ class RoomUser:
     mode: str = "text_and_audio"  # "text_only" or "text_and_audio"
     is_speaker: bool = False
     joined_at: float = field(default_factory=time.time)
+    _audio_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 @dataclass
@@ -516,6 +572,15 @@ class RoomManager:
         if room and room.speaker_id and room.speaker_id in room.users:
             speaker = room.users[room.speaker_id]
             context_lines.append(f"Current speaker: {speaker.name}")
+        # List all attendees so the LLM knows who is in the room
+        if room and room.users:
+            attendee_parts = []
+            for u in room.users.values():
+                role = "teacher" if u.user_id == room.teacher_id else "student"
+                status = "speaking" if u.is_speaker else "listening"
+                attendee_parts.append(f"{u.name} ({u.language}, {role}, {status})")
+            if attendee_parts:
+                context_lines.append(f"Attendees ({len(attendee_parts)}): {', '.join(attendee_parts)}")
 
         if context_lines:
             prompt += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
@@ -599,8 +664,24 @@ class RoomManager:
     ) -> dict:
         """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode).
 
+        Uses a per-user lock to serialize delivery so audio frames from different
+        sentences never interleave on the same WebSocket connection.
+
         Returns a timing dict: {user, language, mode, translate_ms, tts_ms, audio_bytes, total_ms}
         """
+        async with user._audio_lock:
+            return await self._deliver_sentence_to_listener_inner(
+                user, sentence, source_lang, is_final
+            )
+
+    async def _deliver_sentence_to_listener_inner(
+        self,
+        user: RoomUser,
+        sentence: str,
+        source_lang: str,
+        is_final: bool,
+    ) -> dict:
+        """Inner delivery logic — always called under user._audio_lock."""
         t_start = time.time()
         try:
             # ── Translation ──
@@ -778,12 +859,15 @@ class RoomManager:
         messages.append({"role": "user", "content": question})
 
         try:
-            stream = await self._llm_client.chat.completions.create(
-                model=self._llm_model,
-                messages=messages,
-                max_tokens=800,
-                temperature=0.7,
-                stream=True,
+            stream = await asyncio.wait_for(
+                self._llm_client.chat.completions.create(
+                    model=self._llm_model,
+                    messages=messages,
+                    max_tokens=800,
+                    temperature=0.7,
+                    stream=True,
+                ),
+                timeout=30.0,  # 30s to start the stream
             )
 
             async for chunk in stream:
@@ -885,35 +969,8 @@ class RoomManager:
             except Exception:
                 pass
 
-            # Wait for all listener delivery tasks to finish and collect results
-            t_listener_wait_start = time.time()
-            listener_delivery_results: list[dict] = []
-            if pending_listener_tasks:
-                raw_results = await asyncio.gather(*pending_listener_tasks, return_exceptions=True)
-                # Each task returns a list of per-listener dicts
-                for r in raw_results:
-                    if isinstance(r, list):
-                        listener_delivery_results.extend(r)
-                    elif isinstance(r, Exception):
-                        logger.warning(f"[CLASSROOM] Listener fanout error: {r}")
-            t_listener_done = time.time()
-
-            # Signal listeners that streaming is done (lightweight, no re-translation)
-            if stream_to_listeners and room:
-                await self._broadcast_json(room, {
-                    "type": "bot_text_complete",
-                    "text": "",  # Listeners already have the full text from streamed chunks
-                }, exclude=room.speaker_id)
-
-                # Persist bot response to DB
-                asyncio.create_task(
-                    self.save_message_to_db(
-                        room=room, role="assistant", content=full_response,
-                        speaker_name="Mira", original_language=source_lang,
-                    )
-                )
-
             # Update conversation history for context continuity
+            # (must happen before returning so the next message has context)
             if room:
                 room.conversation_history.append({"role": "user", "content": question})
                 room.conversation_history.append({"role": "assistant", "content": full_response})
@@ -921,69 +978,122 @@ class RoomManager:
                 if len(room.conversation_history) > 40:
                     room.conversation_history = room.conversation_history[-30:]
 
-            # ── Comprehensive timing summary ──
-            total_ms = round((time.time() - t0) * 1000, 1)
-            llm_stream_ms = round((t_llm_done - t0) * 1000, 1)
-            ttft_ms = round((t_first_token - t0) * 1000, 1) if t_first_token else 0.0
-            listener_wait_ms = round((t_listener_done - t_listener_wait_start) * 1000, 1)
-            tokens_per_sec = round(token_count / ((t_llm_done - t0) or 1), 1)
+            # ── Listener fanout completion + metrics in background ──
+            # We must NOT block the message loop waiting for listener
+            # translation / TTS — that prevents the speaker from passing
+            # the token or sending new messages while listeners are still
+            # receiving audio.
+            # Capture speaker_id now — it may change by the time the
+            # background task runs (e.g. token was passed).
+            _original_speaker_id = room.speaker_id if room else None
 
-            logger.info(
-                f"[METRICS][CLASSROOM] ask_llm_complete | "
-                f"total={total_ms}ms | ttft={ttft_ms}ms | "
-                f"llm_stream={llm_stream_ms}ms | listener_fanout={listener_wait_ms}ms | "
-                f"tokens={token_count} ({tokens_per_sec} tok/s) | "
-                f"sentences={sentence_count} | response_len={len(full_response)} | "
-                f"q='{question[:40]}' | a='{full_response[:40]}'"
-            )
-            # Record for aggregation
-            _metrics_collector.record_llm_query(total_ms, token_count)
+            async def _finish_listener_fanout():
+                try:
+                    t_listener_wait_start = time.time()
+                    listener_delivery_results: list[dict] = []
+                    if pending_listener_tasks:
+                        raw_results = await asyncio.gather(
+                            *pending_listener_tasks, return_exceptions=True,
+                        )
+                        for r in raw_results:
+                            if isinstance(r, list):
+                                listener_delivery_results.extend(r)
+                            elif isinstance(r, Exception):
+                                logger.warning(f"[CLASSROOM] Listener fanout error: {r}")
+                    t_listener_done = time.time()
 
-            # ── Record per-call trace ──
-            # Aggregate per-listener delivery by user (across sentences)
-            listener_summaries: Dict[str, dict] = {}
-            for ld in listener_delivery_results:
-                key = ld.get("user", "?")
-                if key not in listener_summaries:
-                    listener_summaries[key] = {
-                        "user": key,
-                        "language": ld.get("language", "?"),
-                        "mode": ld.get("mode", "?"),
-                        "sentences": 0,
-                        "translate_ms": 0.0,
-                        "tts_ms": 0.0,
-                        "audio_bytes": 0,
-                        "total_ms": 0.0,
+                    # Signal listeners that streaming is done
+                    if stream_to_listeners and room:
+                        await self._broadcast_json(room, {
+                            "type": "bot_text_complete",
+                            "text": "",
+                        }, exclude=_original_speaker_id)
+
+                        asyncio.create_task(
+                            self.save_message_to_db(
+                                room=room, role="assistant",
+                                content=full_response,
+                                speaker_name="Mira",
+                                original_language=source_lang,
+                            )
+                        )
+
+                    # ── Comprehensive timing summary ──
+                    total_ms = round((time.time() - t0) * 1000, 1)
+                    llm_stream_ms = round((t_llm_done - t0) * 1000, 1)
+                    _ttft_ms = round((t_first_token - t0) * 1000, 1) if t_first_token else 0.0
+                    listener_wait_ms = round(
+                        (t_listener_done - t_listener_wait_start) * 1000, 1,
+                    )
+                    _tok_per_sec = round(
+                        token_count / ((t_llm_done - t0) or 1), 1,
+                    )
+
+                    logger.info(
+                        f"[METRICS][CLASSROOM] ask_llm_complete | "
+                        f"total={total_ms}ms | ttft={_ttft_ms}ms | "
+                        f"llm_stream={llm_stream_ms}ms | "
+                        f"listener_fanout={listener_wait_ms}ms | "
+                        f"tokens={token_count} ({_tok_per_sec} tok/s) | "
+                        f"sentences={sentence_count} | "
+                        f"response_len={len(full_response)} | "
+                        f"q='{question[:40]}' | a='{full_response[:40]}'"
+                    )
+                    _metrics_collector.record_llm_query(total_ms, token_count)
+
+                    # ── Per-call trace ──
+                    listener_summaries: Dict[str, dict] = {}
+                    for ld in listener_delivery_results:
+                        key = ld.get("user", "?")
+                        if key not in listener_summaries:
+                            listener_summaries[key] = {
+                                "user": key,
+                                "language": ld.get("language", "?"),
+                                "mode": ld.get("mode", "?"),
+                                "sentences": 0,
+                                "translate_ms": 0.0,
+                                "tts_ms": 0.0,
+                                "audio_bytes": 0,
+                                "total_ms": 0.0,
+                            }
+                        s = listener_summaries[key]
+                        s["sentences"] += 1
+                        s["translate_ms"] += ld.get("translate_ms", 0.0)
+                        s["tts_ms"] += ld.get("tts_ms", 0.0)
+                        s["audio_bytes"] += ld.get("audio_bytes", 0)
+                        s["total_ms"] = max(
+                            s["total_ms"], ld.get("total_ms", 0.0),
+                        )
+
+                    for s in listener_summaries.values():
+                        s["translate_ms"] = round(s["translate_ms"], 1)
+                        s["tts_ms"] = round(s["tts_ms"], 1)
+                        s["total_ms"] = round(s["total_ms"], 1)
+
+                    trace = {
+                        "mode": "classroom",
+                        "query": question[:80],
+                        "answer": full_response[:80],
+                        "ts": t0,
+                        "total_ms": total_ms,
+                        "stages": [
+                            {"name": "llm_ttft", "ms": _ttft_ms},
+                            {"name": "llm_stream", "ms": llm_stream_ms,
+                             "tokens": token_count,
+                             "tok_per_sec": _tok_per_sec},
+                            {"name": "listener_fanout",
+                             "ms": listener_wait_ms,
+                             "sentences": sentence_count},
+                        ],
+                        "listeners": list(listener_summaries.values()),
                     }
-                s = listener_summaries[key]
-                s["sentences"] += 1
-                s["translate_ms"] += ld.get("translate_ms", 0.0)
-                s["tts_ms"] += ld.get("tts_ms", 0.0)
-                s["audio_bytes"] += ld.get("audio_bytes", 0)
-                s["total_ms"] = max(s["total_ms"], ld.get("total_ms", 0.0))  # max across sentences
+                    _metrics_collector.record_trace(trace)
+                except Exception as exc:
+                    logger.warning(
+                        f"[CLASSROOM] Listener fanout completion error: {exc}"
+                    )
 
-            # Round the aggregated values
-            for s in listener_summaries.values():
-                s["translate_ms"] = round(s["translate_ms"], 1)
-                s["tts_ms"] = round(s["tts_ms"], 1)
-                s["total_ms"] = round(s["total_ms"], 1)
-
-            trace = {
-                "mode": "classroom",
-                "query": question[:80],
-                "answer": full_response[:80],
-                "ts": t0,
-                "total_ms": total_ms,
-                "stages": [
-                    {"name": "llm_ttft", "ms": ttft_ms},
-                    {"name": "llm_stream", "ms": llm_stream_ms, "tokens": token_count,
-                     "tok_per_sec": tokens_per_sec},
-                    {"name": "listener_fanout", "ms": listener_wait_ms,
-                     "sentences": sentence_count},
-                ],
-                "listeners": list(listener_summaries.values()),
-            }
-            _metrics_collector.record_trace(trace)
+            asyncio.create_task(_finish_listener_fanout())
 
             return full_response
 
@@ -1866,7 +1976,19 @@ class RoomManager:
             })
 
     async def send_first_join_greeting(self, room: Room, user: RoomUser):
-        """Send a one-time join greeting (text + optional TTS audio) to a user."""
+        """Send the *text* part of the join greeting synchronously.
+
+        This must be called (and awaited) during the join flow so that the
+        ``bot_text_complete`` for the greeting arrives *before* the message
+        loop starts.  That way it cannot be confused with an LLM response.
+
+        The TTS audio part (slow) is returned as an optional coroutine that
+        the caller should fire-and-forget via ``asyncio.create_task``.
+
+        Returns:
+            An awaitable for the TTS streaming, or ``None`` if no audio is
+            needed.  The caller should wrap it in ``asyncio.create_task``.
+        """
         base_text = f"Welcome to {room.name}, {user.name}. I am Mira. Let's start learning together."
         text = base_text
 
@@ -1888,16 +2010,28 @@ class RoomManager:
             "text": text,
         })
 
-        # Stream greeting speech when user has audio mode enabled.
+        # Return a coroutine for TTS streaming (caller runs as background task).
         if self._tts and user.mode == "text_and_audio":
-            await self._send_json(user.websocket, {"type": "bot_audio_start"})
-            try:
-                async for frame in self._tts.run_tts(text):
-                    if hasattr(frame, "audio") and frame.audio:
-                        await self._send_bytes(user.websocket, frame.audio)
-            except Exception as e:
-                logger.warning(f"[CLASSROOM] Greeting TTS failed for {user.name}: {e}")
-            await self._send_json(user.websocket, {"type": "bot_audio_end"})
+            return self._stream_greeting_audio(user, text)
+        return None
+
+    async def _stream_greeting_audio(self, user: RoomUser, text: str):
+        """Stream greeting TTS audio under the per-user lock.
+
+        Safe to call via ``asyncio.create_task`` — all exceptions are caught.
+        """
+        try:
+            async with user._audio_lock:
+                await self._send_json(user.websocket, {"type": "bot_audio_start"})
+                try:
+                    async for frame in self._tts.run_tts(text):
+                        if hasattr(frame, "audio") and frame.audio:
+                            await self._send_bytes(user.websocket, frame.audio)
+                except Exception as e:
+                    logger.warning(f"[CLASSROOM] Greeting TTS failed for {user.name}: {e}")
+                await self._send_json(user.websocket, {"type": "bot_audio_end"})
+        except Exception as e:
+            logger.warning(f"[CLASSROOM] Greeting audio failed for {user.name}: {e}")
 
     # ── Broadcasting ──
 
@@ -1912,49 +2046,54 @@ class RoomManager:
 
         Even without a translator, sends the original text so listeners always
         see the question (untranslated is better than invisible).
+
+        Safe to call via ``asyncio.create_task`` — all exceptions are caught.
         """
-        speaker = room.users.get(speaker_id)
-        if not speaker:
-            return
+        try:
+            speaker = room.users.get(speaker_id)
+            if not speaker:
+                return
 
-        # Persist message to DB
-        asyncio.create_task(
-            self.save_message_to_db(
-                room=room, role="user", content=text,
-                speaker_id=speaker_id, speaker_name=speaker.name,
-                original_language=language,
-            )
-        )
-
-        t0 = time.time()
-        listener_count = 0
-
-        # Translate + send to each listener in their language (parallel)
-        tasks = []
-        for user in list(room.users.values()):
-            if user.user_id == speaker_id:
-                continue
-            listener_count += 1
-            tasks.append(
-                self._send_translated_event(
-                    user=user,
-                    event_type="transcription",
-                    original_text=text,
-                    source_lang=language,
-                    extra_fields={"user_id": speaker_id, "speaker_name": speaker.name},
+            # Persist message to DB
+            asyncio.create_task(
+                self.save_message_to_db(
+                    room=room, role="user", content=text,
+                    speaker_id=speaker_id, speaker_name=speaker.name,
+                    original_language=language,
                 )
             )
 
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            t0 = time.time()
+            listener_count = 0
 
-        fanout_ms = round((time.time() - t0) * 1000, 1)
-        logger.info(
-            f"[METRICS][CLASSROOM] broadcast_transcription | "
-            f"room={room.room_id} | listeners={listener_count} | "
-            f"fanout_latency={fanout_ms}ms | lang={language} | "
-            f"text='{text[:50]}'"
-        )
+            # Translate + send to each listener in their language (parallel)
+            tasks = []
+            for user in list(room.users.values()):
+                if user.user_id == speaker_id:
+                    continue
+                listener_count += 1
+                tasks.append(
+                    self._send_translated_event(
+                        user=user,
+                        event_type="transcription",
+                        original_text=text,
+                        source_lang=language,
+                        extra_fields={"user_id": speaker_id, "speaker_name": speaker.name},
+                    )
+                )
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            fanout_ms = round((time.time() - t0) * 1000, 1)
+            logger.info(
+                f"[METRICS][CLASSROOM] broadcast_transcription | "
+                f"room={room.room_id} | listeners={listener_count} | "
+                f"fanout_latency={fanout_ms}ms | lang={language} | "
+                f"text='{text[:50]}'"
+            )
+        except Exception as e:
+            logger.warning(f"[CLASSROOM] broadcast_transcription error: {e}")
 
     async def broadcast_bot_response(
         self,
@@ -2045,6 +2184,9 @@ class RoomManager:
         Translate text, add speaker attribution, send JSON event,
         and synthesize + stream TTS audio to a listener.
 
+        Uses per-user lock to serialize audio delivery so frames from
+        different events never interleave on the same WebSocket.
+
         Flow:
           1. Detect actual language of text (guards against LLM drift)
           2. Translate original_text to listener's language
@@ -2055,6 +2197,20 @@ class RoomManager:
           7. Stream audio chunks as binary WebSocket frames
           8. Send bot_audio_end JSON
         """
+        async with user._audio_lock:
+            await self._send_translated_event_inner(
+                user, event_type, original_text, source_lang, extra_fields
+            )
+
+    async def _send_translated_event_inner(
+        self,
+        user: RoomUser,
+        event_type: str,
+        original_text: str,
+        source_lang: str,
+        extra_fields: dict = None,
+    ):
+        """Inner logic — always called under user._audio_lock."""
         t0 = time.time()
         translate_ms = 0.0
         tts_ms = 0.0
@@ -2259,7 +2415,7 @@ class ClassroomBroadcaster(FrameProcessor):
                 self._llm_first_token_at = time.time()
             self._llm_buffer += frame.text
 
-        # LLM response complete — broadcast bot answer
+        # LLM response complete — broadcast bot answer + update conversation history
         elif isinstance(frame, LLMFullResponseEndFrame):
             self._llm_end_at = time.time()
 
@@ -2276,6 +2432,21 @@ class ClassroomBroadcaster(FrameProcessor):
                     f"llm_accum={llm_accum_ms}ms | stt_to_llm_end={stt_to_llm_end_ms}ms | "
                     f"response_len={len(response_text)} chars"
                 )
+
+                # ── Voice-mode conversation history ──
+                # The text-mode path (ask_llm) handles its own history.
+                # For voice-mode, the Pipecat pipeline drives the LLM directly,
+                # so we must record the exchange here for context continuity.
+                if self._last_user_text:
+                    self._room.conversation_history.append(
+                        {"role": "user", "content": self._last_user_text}
+                    )
+                self._room.conversation_history.append(
+                    {"role": "assistant", "content": response_text}
+                )
+                # Keep history manageable (same limit as ask_llm)
+                if len(self._room.conversation_history) > 40:
+                    self._room.conversation_history = self._room.conversation_history[-30:]
 
                 asyncio.create_task(
                     self._room_mgr.broadcast_bot_response(
@@ -2970,12 +3141,29 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
             "recent_messages": recent_messages,
         })
 
-        # One-time per-user-per-room greeting (text + optional speech).
-        if is_first_join_for_user:
-            await room_manager.send_first_join_greeting(room, user)
-
-        # NOW auto-assign speaker token if first user (after 'joined' is sent)
+        # Auto-assign speaker token BEFORE greeting so the client knows its
+        # role immediately.  The greeting can take 5-20 s (translation + TTS)
+        # and must not delay token delivery.
+        #
+        # Capture the current user count *now* so that concurrent joins that
+        # happen while the greeting is running don't invalidate the "first
+        # user" check inside finalize_join.
         await room_manager.finalize_join(room_id, user_id)
+
+        # One-time per-user-per-room greeting.
+        # The TEXT part (translate + bot_text_complete) runs synchronously so
+        # it arrives before the message loop — clients can drain it during
+        # join and won't confuse it with an LLM response.
+        # The AUDIO part (TTS streaming) is slow and runs as a background
+        # task.  The per-user _audio_lock inside _stream_greeting_audio
+        # ensures greeting audio never interleaves with response audio.
+        if is_first_join_for_user:
+            try:
+                audio_coro = await room_manager.send_first_join_greeting(room, user)
+                if audio_coro is not None:
+                    asyncio.create_task(audio_coro)
+            except Exception as e:
+                logger.warning(f"[CLASSROOM] Greeting text failed for {user.name}: {e}")
 
     except asyncio.TimeoutError:
         await websocket.send_json({"type": "error", "message": "Join timeout"})
@@ -3013,12 +3201,16 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                         room_manager._cancel_discussion_auto_release(room)
                     logger.info(f"[CLASSROOM] Text message from {user.name}: {text[:60]}")
 
-                    # 1. Broadcast the speaker's question to listeners (translated)
-                    await room_manager.broadcast_transcription(
-                        room=room,
-                        speaker_id=user.user_id,
-                        text=text,
-                        language=user.language,
+                    # 1. Broadcast the speaker's question to listeners (translated).
+                    #    Fire-and-forget so the LLM call starts immediately
+                    #    and the message loop isn't blocked by listener TTS.
+                    asyncio.create_task(
+                        room_manager.broadcast_transcription(
+                            room=room,
+                            speaker_id=user.user_id,
+                            text=text,
+                            language=user.language,
+                        )
                     )
 
                     # 2. Query LLM — streams tokens to speaker AND listeners sentence-by-sentence
@@ -3038,11 +3230,13 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     if room.room_type == "discussion":
                         room_manager._cancel_discussion_auto_release(room)
                     logger.info(f"[CLASSROOM] Speaker transcript from {user.name}: {text[:60]}")
-                    await room_manager.broadcast_transcription(
-                        room=room,
-                        speaker_id=user.user_id,
-                        text=text,
-                        language=user.language,
+                    asyncio.create_task(
+                        room_manager.broadcast_transcription(
+                            room=room,
+                            speaker_id=user.user_id,
+                            text=text,
+                            language=user.language,
+                        )
                     )
 
             elif msg_type == "teacher_action":
@@ -3150,12 +3344,14 @@ async def classroom_websocket(websocket: WebSocket, room_id: str):
                     "NEXT": "⏭️ Moving to the next topic",
                 }.get(action, action)
 
-                # Broadcast a neutral message to listeners
-                await room_manager.broadcast_transcription(
-                    room=room,
-                    speaker_id=user.user_id,
-                    text=display_text,
-                    language="en",
+                # Broadcast a neutral message to listeners (fire-and-forget)
+                asyncio.create_task(
+                    room_manager.broadcast_transcription(
+                        room=room,
+                        speaker_id=user.user_id,
+                        text=display_text,
+                        language="en",
+                    )
                 )
 
                 # Query LLM with the teacher command — streams to speaker AND listeners

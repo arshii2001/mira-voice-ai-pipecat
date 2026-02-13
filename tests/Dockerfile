@@ -23,8 +23,14 @@ COPY tests/test_language_adherence.py /app/tests/
 COPY tests/test_pipeline_direct.py /app/tests/
 COPY tests/test_client.py /app/tests/
 COPY tests/test_bargein.py /app/tests/
+COPY tests/test_text_audio_sync.py /app/tests/
+COPY tests/test_classroom_integration.py /app/tests/
 COPY tests/test_components.py /app/tests/
+COPY tests/eval_mira.py /app/tests/
 COPY tests/run_all_tests.py /app/tests/
+
+# Copy pyproject.toml for pytest config (asyncio_mode = "auto")
+COPY pyproject.toml /app/pyproject.toml
 
 # Copy server code (needed for unit tests that import classroom/database/translator modules)
 COPY classroom.py /app/

@@ -5,11 +5,20 @@ across key dimensions: friendliness, educational value, Indian cultural groundin
 emotional intelligence, Socratic teaching, and brevity.
 
 Usage:
-    docker compose exec mira-voice python tests/eval_mira.py
-    # or against deployed:
-    MIRA_URL=https://pipecat-v2-api.taile994c5.ts.net python tests/eval_mira.py
+    # Against local Docker stack
+    docker compose run --rm test-voice tests/eval_mira.py
+
+    # Against OSS production (Svara TTS + OSS LLM)
+    python tests/eval_mira.py --target oss
+
+    # Against ElevenLabs production (GPT-4o-mini + ElevenLabs TTS)
+    python tests/eval_mira.py --target elevenlabs
+
+    # Custom URL
+    MIRA_URL=https://mira-oss.inf7ks8.com/pipecat python tests/eval_mira.py
 """
 
+import argparse
 import httpx
 import json
 import os
@@ -18,11 +27,53 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+try:
+    import jwt as pyjwt
+except ImportError:
+    pyjwt = None
+
+# ── Deployment Targets ──
+TARGETS = {
+    "local": {
+        "description": "Local Docker stack",
+        "http_url": "http://localhost:7860",
+    },
+    "oss": {
+        "description": "OSS production (Svara TTS + OSS LLM)",
+        "http_url": "https://mira-oss.inf7ks8.com/pipecat",
+    },
+    "elevenlabs": {
+        "description": "ElevenLabs production (GPT-4o-mini + ElevenLabs TTS)",
+        "http_url": "https://mira-ai.westus2.cloudapp.azure.com/pipecat",
+    },
+}
+
 # ── Config ──
-MIRA_URL = os.getenv("MIRA_URL", "http://localhost:7860")
+MIRA_URL = os.getenv("MIRA_URL", os.getenv("PIPECAT_HTTP_URL", "http://localhost:7860"))
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", "gpt-4o")
 JUDGE_API_KEY = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
 JUDGE_BASE_URL = os.getenv("JUDGE_BASE_URL", "https://api.openai.com/v1")
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "").strip() or None
+
+
+def _make_jwt(user_id: str = "eval-user") -> str:
+    """Generate a JWT token for authenticated endpoints."""
+    if not WEBUI_SECRET_KEY or not pyjwt:
+        return ""
+    payload = {
+        "id": user_id,
+        "email": f"{user_id}@example.test",
+        "exp": int(time.time()) + 7200,
+    }
+    return pyjwt.encode(payload, WEBUI_SECRET_KEY, algorithm="HS256")
+
+
+def _auth_headers() -> dict:
+    """Return Authorization header if WEBUI_SECRET_KEY is set."""
+    token = _make_jwt()
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    return {}
 
 # ── Eval Dimensions ──
 JUDGE_SYSTEM_PROMPT = """You are an expert evaluator for an AI tutor called Mira, designed for Indian students in Grades 5-8.
@@ -197,14 +248,22 @@ def get_mira_response(test: TestCase) -> dict:
     if test.topic:
         body["topic"] = test.topic
 
-    client = httpx.Client(timeout=30)
+    headers = _auth_headers()
+    client = httpx.Client(timeout=120)
     t0 = time.time()
-    r = client.post(f"{MIRA_URL}/chat", json=body)
+    r = client.post(f"{MIRA_URL}/chat", json=body, headers=headers)
     latency_ms = round((time.time() - t0) * 1000)
+
+    if r.status_code != 200:
+        return {
+            "content": f"[ERROR {r.status_code}]: {r.text[:200]}",
+            "tokens": 0,
+            "latency_ms": latency_ms,
+        }
 
     data = r.json()
     content = data["choices"][0]["message"]["content"]
-    tokens = data["usage"]["completion_tokens"]
+    tokens = data.get("usage", {}).get("completion_tokens", 0)
 
     return {
         "content": content,
@@ -213,8 +272,8 @@ def get_mira_response(test: TestCase) -> dict:
     }
 
 
-def judge_response(test: TestCase, mira_response: str) -> dict:
-    """Use GPT-4o to judge Mira's response."""
+def judge_response(test: TestCase, mira_response: str, max_retries: int = 3) -> dict:
+    """Use GPT-4o to judge Mira's response. Retries on timeout."""
     user_context = f"Student name: {test.user_name or 'unknown'}"
     if test.topic:
         user_context += f"\nTopic: {test.topic}"
@@ -228,38 +287,55 @@ Mira's response: {mira_response}
 
 Score this response."""
 
-    client = httpx.Client(timeout=30)
-    r = client.post(
-        f"{JUDGE_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {JUDGE_API_KEY}"},
-        json={
-            "model": JUDGE_MODEL,
-            "messages": [
-                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": judge_prompt},
-            ],
-            "temperature": 0.0,
-        },
-    )
-    data = r.json()
-    raw = data["choices"][0]["message"]["content"]
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            client = httpx.Client(timeout=90)
+            r = client.post(
+                f"{JUDGE_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {JUDGE_API_KEY}"},
+                json={
+                    "model": JUDGE_MODEL,
+                    "messages": [
+                        {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                        {"role": "user", "content": judge_prompt},
+                    ],
+                    "temperature": 0.0,
+                },
+            )
+            data = r.json()
+            raw = data["choices"][0]["message"]["content"]
 
-    # Parse JSON from judge response (handle markdown wrapping)
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            # Parse JSON from judge response (handle markdown wrapping)
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
-    try:
-        scores = json.loads(raw)
-    except json.JSONDecodeError:
-        scores = {
-            "friendly_warm": 0, "educational_encouraging": 0,
-            "indian_cultural": 0, "emotional_intelligence": 0,
-            "socratic_teaching": 0, "brevity_voice_ready": 0,
-            "overall": 0, "one_line_feedback": f"PARSE ERROR: {raw[:100]}",
-        }
+            try:
+                scores = json.loads(raw)
+            except json.JSONDecodeError:
+                scores = {
+                    "friendly_warm": 0, "educational_encouraging": 0,
+                    "indian_cultural": 0, "emotional_intelligence": 0,
+                    "socratic_teaching": 0, "brevity_voice_ready": 0,
+                    "overall": 0, "one_line_feedback": f"PARSE ERROR: {raw[:100]}",
+                }
 
-    return scores
+            return scores
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                wait = 2 ** attempt  # 1s, 2s, 4s backoff
+                print(f"\n   ⚠️  Judge timeout (attempt {attempt+1}/{max_retries}), retrying in {wait}s...", end=" ", flush=True)
+                time.sleep(wait)
+
+    # All retries exhausted — return error scores
+    return {
+        "friendly_warm": 0, "educational_encouraging": 0,
+        "indian_cultural": 0, "emotional_intelligence": 0,
+        "socratic_teaching": 0, "brevity_voice_ready": 0,
+        "overall": 0, "one_line_feedback": f"JUDGE TIMEOUT after {max_retries} retries: {str(last_err)[:60]}",
+    }
 
 
 def print_colored(text, color_code):
@@ -280,29 +356,60 @@ def score_bar(score, max_score=5):
 
 
 def main():
+    global MIRA_URL
+
+    parser = argparse.ArgumentParser(description="Mira Tutor Eval — Quality Metrics")
+    parser.add_argument(
+        "--target", choices=list(TARGETS.keys()), default=None,
+        help="Deployment target (local, oss, elevenlabs). Overrides MIRA_URL.",
+    )
+    args = parser.parse_args()
+
+    if args.target:
+        target = TARGETS[args.target]
+        MIRA_URL = target["http_url"]
+        target_name = f"{args.target} — {target['description']}"
+    else:
+        target_name = "custom" if MIRA_URL != "http://localhost:7860" else "local"
+
     if not JUDGE_API_KEY or JUDGE_API_KEY == "DUMMY_KEY":
         print("ERROR: Set LLM_API_KEY or OPENAI_API_KEY for the judge model")
         sys.exit(1)
 
+    auth_status = "JWT ✓" if WEBUI_SECRET_KEY else "no auth"
+
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║          MIRA TUTOR EVAL — Judge Model Assessment           ║")
     print("╠══════════════════════════════════════════════════════════════╣")
-    print(f"║  Mira: {MIRA_URL:<52} ║")
-    print(f"║  Judge: {JUDGE_MODEL:<51} ║")
-    print(f"║  Test cases: {len(TEST_CASES):<46} ║")
+    print(f"║  Target: {target_name:<50} ║")
+    print(f"║  Mira:   {MIRA_URL:<50} ║")
+    print(f"║  Auth:   {auth_status:<50} ║")
+    print(f"║  Judge:  {JUDGE_MODEL:<50} ║")
+    print(f"║  Tests:  {len(TEST_CASES):<50} ║")
     print("╚══════════════════════════════════════════════════════════════╝\n")
 
     results = []
     category_scores = {}
 
+    skipped = 0
     for i, test in enumerate(TEST_CASES):
         print(f"[{i+1}/{len(TEST_CASES)}] {test.label}...", end=" ", flush=True)
 
-        # Get Mira's response
-        mira = get_mira_response(test)
+        try:
+            # Get Mira's response
+            mira = get_mira_response(test)
 
-        # Judge it
-        scores = judge_response(test, mira["content"])
+            if mira["content"].startswith("[ERROR"):
+                print_colored(f"SKIP — {mira['content'][:80]}", "\033[33m")
+                skipped += 1
+                continue
+
+            # Judge it
+            scores = judge_response(test, mira["content"])
+        except Exception as e:
+            print_colored(f"SKIP — {type(e).__name__}: {str(e)[:60]}", "\033[33m")
+            skipped += 1
+            continue
 
         results.append({
             "test": test,
@@ -320,6 +427,9 @@ def main():
 
         overall = scores.get("overall", 0)
         print_colored(f"{'★' * overall}{'☆' * (5-overall)} ({overall}/5) — {scores.get('one_line_feedback', '')[:60]}", score_color(overall))
+
+    if skipped:
+        print(f"\n⚠️  {skipped}/{len(TEST_CASES)} tests skipped due to errors")
 
     # ── Detailed Results ──
     print("\n" + "=" * 70)
@@ -405,7 +515,8 @@ def main():
         print(f"   • {r['test'].id} ({s.get('overall',0)}/5): {s.get('one_line_feedback','')}")
 
     # ── Save full results to JSON ──
-    output_path = "tests/eval_results.json"
+    target_suffix = args.target or "local"
+    output_path = f"tests/eval_results_{target_suffix}.json"
     json_results = []
     for r in results:
         json_results.append({
@@ -422,7 +533,13 @@ def main():
         })
 
     with open(output_path, "w") as f:
-        json.dump({"timestamp": time.time(), "judge_model": JUDGE_MODEL, "results": json_results}, f, indent=2, ensure_ascii=False)
+        json.dump({
+            "timestamp": time.time(),
+            "target": target_suffix,
+            "mira_url": MIRA_URL,
+            "judge_model": JUDGE_MODEL,
+            "results": json_results,
+        }, f, indent=2, ensure_ascii=False)
     print(f"\n📄 Full results saved to {output_path}")
 
     print("\n🏁 EVAL COMPLETE!")

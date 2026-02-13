@@ -148,6 +148,26 @@ async def health_check():
     return {"status": "healthy", "service": "mira-voice-ai-pipecat"}
 
 
+@app.get("/auth/health")
+async def auth_health_check():
+    """Auth diagnostics endpoint — no JWT required.
+
+    Returns the secret key fingerprint (first 8 hex chars of SHA-256) so
+    operators can compare it with the OpenWebUI pod's fingerprint to verify
+    both services loaded the SAME WEBUI_SECRET_KEY.
+
+    Usage:
+        curl https://pipecat-host/auth/health
+        curl https://openwebui-host/api/health  # compare fingerprints
+    """
+    from auth import AUTH_ENABLED, get_secret_fingerprint
+    return {
+        "auth_enabled": AUTH_ENABLED,
+        "secret_fingerprint": get_secret_fingerprint(),
+        "hint": "Compare this fingerprint with OpenWebUI's to verify JWT trust",
+    }
+
+
 @app.get("/metrics", dependencies=[Depends(_require_jwt)])
 async def metrics():
     """Server-side performance metrics.

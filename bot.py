@@ -411,23 +411,197 @@ class TextStreamForwarder(FrameProcessor):
     """
     Sends LLM text to the client as JSON messages for real-time text rendering.
 
-    Used in BOTH modes:
-      - text_and_audio: client gets text + audio simultaneously (text for rendering,
-        audio for playback). Frames still flow downstream to TTS.
-      - text_only: client gets text only; TTSSpeakFrames are consumed here
-        (no TTS downstream to process them).
+    Each WebSocket connection gets its own ``TextStreamForwarder`` +
+    ``TextAudioSyncNotifier`` pair, so all state is **per-receiver**.
+
+    Behavior depends on mode:
+
+    text_only mode:
+      Streams every LLM token immediately for fast text rendering.
+      TTSSpeakFrames (greetings) are consumed here — no TTS downstream.
+
+    text_and_audio mode:
+      Text is QUEUED sentence-by-sentence into an ``asyncio.Queue`` and
+      only released to the client when TTS actually starts speaking that
+      sentence.  A companion ``TextAudioSyncNotifier`` sits after TTS in
+      the pipeline and calls ``release_next_sentence()`` on each
+      ``TTSStartedFrame``.
+
+      **TTS timeout guard** — if a queued sentence sits for longer than
+      ``_TTS_SENTENCE_TIMEOUT`` seconds without TTS starting, a watchdog
+      task sends the text to the client anyway (so the user can read it),
+      then continues with the next sentence.  This prevents text from
+      being stuck behind a hung or errored TTS call.
 
     JSON messages sent:
-      - {"type": "bot_text", "text": "chunk", "streaming": true}  — per LLM token
-      - {"type": "bot_text_complete", "text": "full response"}     — end of response
+      - {"type": "bot_text", "text": "...", "streaming": true}
+      - {"type": "bot_text_complete", "text": "full response"}
     """
+
+    # Sentence-ending punctuation (covers English, Hindi Devanagari, etc.)
+    _SENTENCE_ENDS = re.compile(r'[.!?।؟\n]\s*$')
+
+    # How long to wait for TTS to start a sentence before sending text anyway
+    _TTS_SENTENCE_TIMEOUT = 15.0  # seconds
 
     def __init__(self, websocket, text_only: bool = False, name: str = "TextStreamForwarder", **kwargs):
         super().__init__(name=name, **kwargs)
         self._websocket = websocket
         self._text_only = text_only
         self._current_response = ""
+        self._sentence_buffer = ""        # Accumulates tokens until sentence boundary
         self._in_response = False
+
+        # ── Per-receiver sentence queue (text_and_audio only) ──
+        # Each sentence is a string.  The queue is consumed by
+        # release_next_sentence() which is called either by
+        # TextAudioSyncNotifier (on TTSStartedFrame) or by the
+        # watchdog timer if TTS is too slow.
+        self._sentence_q: asyncio.Queue[str] = asyncio.Queue()
+        self._watchdog_task: asyncio.Task | None = None
+        self._watchdog_event = asyncio.Event()  # signalled when TTS releases a sentence
+
+        # ── Metrics (per-response, reset on LLMFullResponseStartFrame) ──
+        self._metrics_sentences_queued: int = 0       # sentences enqueued this response
+        self._metrics_sentences_released: int = 0     # released by TTS (normal path)
+        self._metrics_sentences_timed_out: int = 0    # released by watchdog (TTS too slow)
+        self._metrics_sentences_flushed: int = 0      # flushed on end/interruption
+        self._metrics_response_start_at: float = 0.0  # time of LLMFullResponseStartFrame
+        self._metrics_first_sentence_queued_at: float = 0.0
+        self._metrics_first_sentence_released_at: float = 0.0
+
+        # ── Session-level metrics (across all responses) ──
+        self._metrics_total_responses: int = 0
+        self._metrics_total_timeouts: int = 0
+        self._metrics_total_interruptions: int = 0
+
+    def _reset_response_metrics(self):
+        """Reset per-response metrics counters."""
+        self._metrics_sentences_queued = 0
+        self._metrics_sentences_released = 0
+        self._metrics_sentences_timed_out = 0
+        self._metrics_sentences_flushed = 0
+        self._metrics_response_start_at = time.time()
+        self._metrics_first_sentence_queued_at = 0.0
+        self._metrics_first_sentence_released_at = 0.0
+
+    def _log_response_metrics(self):
+        """Log a summary of text-audio sync metrics for the completed response."""
+        total = self._metrics_sentences_queued
+        if total == 0 and self._text_only:
+            return  # text_only mode doesn't queue sentences
+        elapsed_ms = round((time.time() - self._metrics_response_start_at) * 1000, 1) if self._metrics_response_start_at else 0
+        queue_to_release_ms = 0.0
+        if self._metrics_first_sentence_queued_at and self._metrics_first_sentence_released_at:
+            queue_to_release_ms = round(
+                (self._metrics_first_sentence_released_at - self._metrics_first_sentence_queued_at) * 1000, 1
+            )
+        mode_label = "text_only" if self._text_only else "text_and_audio"
+        logger.info(
+            f"[TEXT_SYNC_METRICS] response_complete | mode={mode_label} | "
+            f"sentences_queued={total} | released_by_tts={self._metrics_sentences_released} | "
+            f"timed_out={self._metrics_sentences_timed_out} | flushed={self._metrics_sentences_flushed} | "
+            f"first_sentence_delay={queue_to_release_ms}ms | total_elapsed={elapsed_ms}ms | "
+            f"session_responses={self._metrics_total_responses} | "
+            f"session_timeouts={self._metrics_total_timeouts}"
+        )
+
+    # ── Called by TextAudioSyncNotifier when TTS starts a sentence ──
+    async def release_next_sentence(self):
+        """Send the next queued sentence to the client (called on TTSStartedFrame)."""
+        if self._sentence_q.empty():
+            return
+        try:
+            text = self._sentence_q.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        await self._send_sentence(text)
+        self._metrics_sentences_released += 1
+        if self._metrics_sentences_released == 1:
+            self._metrics_first_sentence_released_at = time.time()
+        # Signal watchdog that this sentence was released normally
+        self._watchdog_event.set()
+
+    async def _send_sentence(self, text: str):
+        """Send a single sentence to the client."""
+        try:
+            await self._websocket.send_json({
+                "type": "bot_text",
+                "text": text,
+                "streaming": True,
+            })
+            logger.debug(f"[TEXT_STREAM] Released sentence: '{text[:80]}'")
+        except Exception as e:
+            logger.warning(f"[TEXT_STREAM] Failed to send sentence: {e}")
+
+    async def flush_all_queued(self):
+        """Flush all remaining queued sentences (called on response end / interruption)."""
+        while not self._sentence_q.empty():
+            try:
+                text = self._sentence_q.get_nowait()
+                await self._send_sentence(text)
+                self._metrics_sentences_flushed += 1
+            except asyncio.QueueEmpty:
+                break
+        self._stop_watchdog()
+
+    def _start_watchdog(self):
+        """Start the TTS timeout watchdog (if not already running)."""
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    def _stop_watchdog(self):
+        """Cancel the watchdog task."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
+    async def _watchdog_loop(self):
+        """
+        Background task: if a sentence sits in the queue longer than
+        _TTS_SENTENCE_TIMEOUT without being released by TTS, send the
+        text to the client anyway.  This prevents text from being stuck
+        behind a hung TTS call — the user can at least read it.
+        """
+        try:
+            while True:
+                # Wait for a sentence to be enqueued
+                if self._sentence_q.empty():
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # A sentence is waiting — give TTS time to claim it
+                self._watchdog_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._watchdog_event.wait(),
+                        timeout=self._TTS_SENTENCE_TIMEOUT,
+                    )
+                    # TTS released it in time — loop back
+                    continue
+                except asyncio.TimeoutError:
+                    pass
+
+                # TTS didn't start this sentence in time — send text anyway
+                if not self._sentence_q.empty():
+                    try:
+                        text = self._sentence_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        continue
+                    self._metrics_sentences_timed_out += 1
+                    self._metrics_total_timeouts += 1
+                    logger.warning(
+                        f"[TEXT_STREAM] TTS timeout ({self._TTS_SENTENCE_TIMEOUT}s) — "
+                        f"sending text without audio: '{text[:60]}' "
+                        f"(timeout #{self._metrics_sentences_timed_out} this response, "
+                        f"#{self._metrics_total_timeouts} session)"
+                    )
+                    await self._send_sentence(text)
+                    # Continue loop — will pick up next sentence
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[TEXT_STREAM] Watchdog error: {e}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -435,10 +609,19 @@ class TextStreamForwarder(FrameProcessor):
         if isinstance(frame, LLMFullResponseStartFrame):
             self._in_response = True
             self._current_response = ""
+            self._sentence_buffer = ""
+            self._metrics_total_responses += 1
+            self._reset_response_metrics()
+            # Drain any leftover from previous response
+            while not self._sentence_q.empty():
+                try:
+                    self._sentence_q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, TTSSpeakFrame):
-            # Greeting / direct-speak frames — send as text
+            # Greeting / direct-speak frames — send as text immediately
             try:
                 await self._websocket.send_json({
                     "type": "bot_text_complete",
@@ -456,36 +639,151 @@ class TextStreamForwarder(FrameProcessor):
 
         elif isinstance(frame, TextFrame) and self._in_response:
             self._current_response += frame.text
-            # Stream each token to client for real-time text rendering
-            try:
-                await self._websocket.send_json({
-                    "type": "bot_text",
-                    "text": frame.text,
-                    "streaming": True,
-                })
-                logger.debug(f"[TEXT_STREAM] Sent bot_text chunk: '{frame.text}'")
-            except Exception as e:
-                logger.warning(f"[TEXT_STREAM] Failed to send text chunk: {e}")
+
+            if self._text_only:
+                # ── text_only: stream every token immediately (fast) ──
+                try:
+                    await self._websocket.send_json({
+                        "type": "bot_text",
+                        "text": frame.text,
+                        "streaming": True,
+                    })
+                    logger.debug(f"[TEXT_STREAM] Sent token: '{frame.text}'")
+                except Exception as e:
+                    logger.warning(f"[TEXT_STREAM] Failed to send token: {e}")
+            else:
+                # ── text_and_audio: buffer tokens, enqueue on sentence boundary ──
+                # Don't send to client yet — TextAudioSyncNotifier will call
+                # release_next_sentence() when TTS starts speaking this sentence.
+                self._sentence_buffer += frame.text
+                if self._SENTENCE_ENDS.search(self._sentence_buffer):
+                    sentence = self._sentence_buffer.strip()
+                    if sentence:
+                        self._sentence_q.put_nowait(sentence)
+                        self._metrics_sentences_queued += 1
+                        if self._metrics_sentences_queued == 1:
+                            self._metrics_first_sentence_queued_at = time.time()
+                        self._start_watchdog()
+                        logger.debug(f"[TEXT_STREAM] Queued sentence #{self._metrics_sentences_queued}: '{sentence[:60]}'")
+                    self._sentence_buffer = ""
+
             # Always push downstream (to TTS in audio mode, or to assistant aggregator)
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, LLMFullResponseEndFrame):
             self._in_response = False
-            # Send complete response for client to finalize display
-            try:
-                await self._websocket.send_json({
-                    "type": "bot_text_complete",
-                    "text": self._current_response,
-                })
-                logger.info(f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'")
-            except Exception as e:
-                logger.debug(f"[TEXT_STREAM] Failed to send complete text: {e}")
-            self._current_response = ""
+
+            if self._text_only:
+                # text_only: send bot_text_complete immediately (no TTS to wait for)
+                try:
+                    await self._websocket.send_json({
+                        "type": "bot_text_complete",
+                        "text": self._current_response,
+                    })
+                    logger.info(f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'")
+                except Exception as e:
+                    logger.debug(f"[TEXT_STREAM] Failed to send complete text: {e}")
+                self._current_response = ""
+                self._log_response_metrics()
+            else:
+                # text_and_audio: enqueue any remaining partial sentence.
+                # Do NOT send bot_text_complete here — TextAudioSyncNotifier
+                # will flush queued sentences first, then send the complete message
+                # so the client gets text in the right order.
+                leftover = self._sentence_buffer.strip()
+                if leftover:
+                    self._sentence_q.put_nowait(leftover)
+                    self._start_watchdog()
+                self._sentence_buffer = ""
+                # _current_response is preserved — TextAudioSyncNotifier reads it
+
+            await self.push_frame(frame, direction)
+
+        elif isinstance(frame, StartInterruptionFrame):
+            # On barge-in, flush any queued text immediately so the client
+            # has the full text up to the interruption point.
+            if not self._text_only:
+                self._metrics_total_interruptions += 1
+                await self.flush_all_queued()
+                self._sentence_buffer = ""
+                self._log_response_metrics()
             await self.push_frame(frame, direction)
 
         else:
             # Forward everything else unchanged
             await self.push_frame(frame, direction)
+
+
+class TextAudioSyncNotifier(FrameProcessor):
+    """
+    Sits AFTER TTS in the text_and_audio pipeline.  Per-receiver (one
+    instance per WebSocket connection, paired with a TextStreamForwarder).
+
+    When TTS emits a ``TTSStartedFrame`` (= it began synthesising a sentence),
+    this processor tells the upstream ``TextStreamForwarder`` to release the
+    corresponding sentence text to the client.  The result: text appears in
+    the chat window at the same moment audio starts playing.
+
+    On ``TTSStoppedFrame`` after the last sentence (when LLM response is done),
+    it sends ``bot_text_complete`` so the client finalizes the display.
+    """
+
+    def __init__(self, text_forwarder: TextStreamForwarder, name: str = "TextAudioSyncNotifier", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self._text_forwarder = text_forwarder
+
+    async def _send_complete_if_done(self):
+        """Send bot_text_complete if the LLM response is finished and all sentences released."""
+        fwd = self._text_forwarder
+        if not fwd._in_response and fwd._sentence_q.empty() and fwd._current_response:
+            fwd._stop_watchdog()
+            try:
+                await fwd._websocket.send_json({
+                    "type": "bot_text_complete",
+                    "text": fwd._current_response,
+                })
+                logger.info(
+                    f"[TEXT_SYNC] Complete response (after TTS): "
+                    f"'{fwd._current_response[:120]}{'...' if len(fwd._current_response) > 120 else ''}'"
+                )
+            except Exception as e:
+                logger.debug(f"[TEXT_SYNC] Failed to send complete text: {e}")
+            fwd._current_response = ""
+            fwd._log_response_metrics()
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, TTSStartedFrame):
+            # TTS just started speaking a sentence — release text to client
+            await self._text_forwarder.release_next_sentence()
+
+        elif isinstance(frame, TTSStoppedFrame):
+            # After each sentence's audio finishes, check if we're done
+            await self._send_complete_if_done()
+
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            # Safety net: if TTS didn't emit TTSStartedFrame for some sentences
+            # (e.g. empty text, TTS error), flush remaining text and finalize.
+            fwd = self._text_forwarder
+            await fwd.flush_all_queued()
+            await self._send_complete_if_done()
+
+        elif isinstance(frame, StartInterruptionFrame):
+            # On barge-in, flush remaining text immediately and send complete
+            fwd = self._text_forwarder
+            await fwd.flush_all_queued()
+            if fwd._current_response:
+                try:
+                    await fwd._websocket.send_json({
+                        "type": "bot_text_complete",
+                        "text": fwd._current_response,
+                    })
+                except Exception:
+                    pass
+                fwd._current_response = ""
+
+        await self.push_frame(frame, direction)
 
 
 class UserTranscriptForwarder(FrameProcessor):
@@ -546,6 +844,171 @@ class UserTranscriptForwarder(FrameProcessor):
 
         else:
             await self.push_frame(frame, direction)
+
+
+class STTClarityGate(FrameProcessor):
+    """
+    Pipeline processor that intercepts low-clarity STT transcriptions and
+    asks the speaker to repeat — like a human teacher who says "I didn't
+    catch that, could you say it again?"
+
+    Sits BETWEEN STT + UserTranscriptForwarder and the LLM aggregator.
+
+    Behavior:
+      - If ``TranscriptionFrame.clarity_score >= CLARITY_THRESHOLD``:
+        pass through normally (LLM processes the transcription).
+      - If ``clarity_score < CLARITY_THRESHOLD``:
+        1. Drop the transcription (don't send to LLM).
+        2. Inject a ``TTSSpeakFrame`` asking the speaker to repeat.
+        3. Send a ``stt_clarification`` JSON message to the client so the
+           frontend can display a "please repeat" indicator.
+        4. Log the event for metrics.
+
+    The threshold and clarification messages are configurable via env vars:
+      - ``STT_CLARITY_THRESHOLD`` (default: 0.50)
+      - ``STT_CLARITY_MAX_RETRIES`` (default: 2) — after N consecutive
+        low-clarity utterances, pass through anyway to avoid infinite loops.
+
+    This processor does NOT affect:
+      - Typed text (TextInputInjector) — those bypass STT entirely.
+      - Interim transcriptions — only final transcriptions are gated.
+      - Classroom mode — ClassroomBroadcaster handles its own transcription
+        broadcasting. This gate runs in the speaker's pipeline before the
+        LLM sees the transcription.
+    """
+
+    # Clarification messages by detected language
+    _CLARIFICATION_MESSAGES = {
+        "en": "Sorry, I didn't quite catch that. Could you say it again?",
+        "hi": "माफ़ कीजिए, मुझे ठीक से सुनाई नहीं दिया। क्या आप दोबारा बोल सकते हैं?",
+        "ta": "மன்னிக்கவும், எனக்கு சரியாகப் புரியவில்லை. மீண்டும் சொல்ல முடியுமா?",
+    }
+
+    # Echo-back confirmation messages (for medium-low confidence)
+    _ECHO_MESSAGES = {
+        "en": "Did you say: \"{text}\"?",
+        "hi": "क्या आपने कहा: \"{text}\"?",
+        "ta": "நீங்கள் சொன்னது: \"{text}\" என்பதா?",
+    }
+
+    def __init__(
+        self,
+        websocket,
+        name: str = "STTClarityGate",
+        clarity_threshold: float = None,
+        max_retries: int = None,
+        metrics_collector=None,
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        self._websocket = websocket
+        self._clarity_threshold = clarity_threshold or float(
+            os.getenv("STT_CLARITY_THRESHOLD", "0.50")
+        )
+        self._max_retries = max_retries or int(
+            os.getenv("STT_CLARITY_MAX_RETRIES", "2")
+        )
+        self._consecutive_low = 0  # Track consecutive low-clarity utterances
+        self._enabled = os.getenv("STT_CLARITY_GATE_ENABLED", "true").lower() == "true"
+        self._metrics_collector = metrics_collector
+
+        # Metrics
+        self._total_gated = 0
+        self._total_passed = 0
+        self._total_force_passed = 0  # Passed after max retries
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if not isinstance(frame, TranscriptionFrame):
+            # Pass everything else through unchanged
+            await self.push_frame(frame, direction)
+            return
+
+        # Only gate voice transcriptions, not typed text
+        if getattr(frame, "user_id", "") == "typed":
+            self._consecutive_low = 0
+            await self.push_frame(frame, direction)
+            return
+
+        # If gate is disabled, pass through with logging
+        if not self._enabled:
+            await self.push_frame(frame, direction)
+            return
+
+        clarity = getattr(frame, "clarity_score", 1.0)
+        raw_text = getattr(frame, "raw_text", "")
+        lang = getattr(frame, "language", "en") or "en"
+
+        if clarity >= self._clarity_threshold:
+            # High clarity — pass through normally
+            self._consecutive_low = 0
+            self._total_passed += 1
+            if self._metrics_collector:
+                self._metrics_collector.record_stt_clarity(clarity, gated=False, language=lang)
+            logger.debug(
+                f"[CLARITY_GATE] PASS | score={clarity:.2f} | "
+                f"text='{raw_text[:60]}'"
+            )
+            await self.push_frame(frame, direction)
+            return
+
+        # Low clarity detected
+        self._consecutive_low += 1
+
+        # Safety valve: after max_retries consecutive low-clarity utterances,
+        # pass through anyway to avoid frustrating the user
+        if self._consecutive_low > self._max_retries:
+            self._total_force_passed += 1
+            if self._metrics_collector:
+                self._metrics_collector.record_stt_clarity(clarity, gated=False, language=lang)
+            logger.warning(
+                f"[CLARITY_GATE] FORCE_PASS | score={clarity:.2f} | "
+                f"consecutive_low={self._consecutive_low} > max_retries={self._max_retries} | "
+                f"text='{raw_text[:60]}'"
+            )
+            self._consecutive_low = 0
+            await self.push_frame(frame, direction)
+            return
+
+        # Gate the transcription — don't send to LLM
+        self._total_gated += 1
+        if self._metrics_collector:
+            self._metrics_collector.record_stt_clarity(clarity, gated=True, language=lang)
+        logger.info(
+            f"[CLARITY_GATE] GATED | score={clarity:.2f} | "
+            f"attempt={self._consecutive_low}/{self._max_retries} | "
+            f"text='{raw_text[:60]}' | "
+            f"total_gated={self._total_gated}"
+        )
+
+        # Choose clarification message based on language
+        clarification = self._CLARIFICATION_MESSAGES.get(
+            lang, self._CLARIFICATION_MESSAGES["en"]
+        )
+
+        # Notify the client about the clarification
+        try:
+            await self._websocket.send_json({
+                "type": "stt_clarification",
+                "message": clarification,
+                "clarity_score": clarity,
+                "original_text": raw_text,
+                "attempt": self._consecutive_low,
+                "max_retries": self._max_retries,
+            })
+        except Exception as e:
+            logger.warning(f"[CLARITY_GATE] Failed to send clarification JSON: {e}")
+
+        # Speak the clarification via TTS so the user hears it
+        await self.push_frame(
+            TTSSpeakFrame(text=clarification),
+            FrameDirection.DOWNSTREAM,
+        )
+
+        # Do NOT push the original TranscriptionFrame — it's dropped.
+        # The user will re-speak, and the next transcription will be
+        # evaluated again by this gate.
 
 
 class TextInputInjector(FrameProcessor):
@@ -734,7 +1197,7 @@ VAD_STOP_SECS = float(os.getenv("VAD_STOP_SECS", "1.0"))
 VAD_MIN_VOLUME = float(os.getenv("VAD_MIN_VOLUME", "0.4"))
 
 # Prompt configuration
-PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+PROMPT_DIR = os.getenv("PROMPT_DIR", os.path.join(os.path.dirname(__file__), "prompts"))
 PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v4")
 
 
@@ -1088,6 +1551,14 @@ async def create_bot_pipeline(
         name="UserTranscriptForwarder",
     )
 
+    # STTClarityGate intercepts low-clarity transcriptions and asks the
+    # speaker to repeat — like a human teacher who says "I didn't catch that"
+    clarity_gate = STTClarityGate(
+        websocket=websocket,
+        name="STTClarityGate",
+        metrics_collector=metrics_collector,
+    )
+
     # TextInputInjector allows typed text to be injected into the voice pipeline
     text_injector = None
     if session_id:
@@ -1109,6 +1580,7 @@ async def create_bot_pipeline(
             stt,                            # 2. Speech-to-text
             *injector_list,                 # 2b. Text injection point (typed text)
             user_transcript_forwarder,      # 3. Send user transcript to client
+            clarity_gate,                   # 3b. Gate low-clarity STT (ask to repeat)
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
             action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
@@ -1120,20 +1592,28 @@ async def create_bot_pipeline(
             assistant_aggregator,           # 11. Collect assistant responses for context
         ])
     else:
-        logger.info("[PIPELINE] text_and_audio mode: text streamed + TTS audio")
+        logger.info("[PIPELINE] text_and_audio mode: text synced with TTS audio")
+        # TextAudioSyncNotifier sits after TTS and triggers text release
+        # to the client when each sentence's audio actually starts playing.
+        text_audio_sync = TextAudioSyncNotifier(
+            text_forwarder=text_forwarder,
+            name="TextAudioSyncNotifier",
+        )
         pipeline = Pipeline([
             transport.input(),              # 1. Receive audio from client
             stt,                            # 2. Speech-to-text
             *injector_list,                 # 2b. Text injection point (typed text)
             user_transcript_forwarder,      # 3. Send user transcript to client
+            clarity_gate,                   # 3b. Gate low-clarity STT (ask to repeat)
             user_aggregator,                # 4. Collect user messages and trigger LLM
             llm,                            # 5. Language model
             action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
             transcript_logger,              # 6. Log conversation turns
             *extra_processors,              # 7. Optional taps (e.g., classroom)
             greeting_processor,             # 8. Inject greeting on StartFrame
-            text_forwarder,                 # 9. Stream text as JSON to client
+            text_forwarder,                 # 9. Queue text sentences (don't send yet)
             tts,                            # 10. Text-to-speech (audio)
+            text_audio_sync,                # 10b. On TTSStarted → release queued text
             transport.output(),             # 11. Send audio to client
             assistant_aggregator,           # 12. Collect assistant responses for context
         ])

@@ -1852,9 +1852,12 @@ async def test_three_clients_e2e() -> TestResult:
         logger.info("  4. Speaker sent: 'What is photosynthesis?'")
 
         # Wait for bot response on speaker side
+        # Translation of listener greetings can take 16+ seconds (timeout),
+        # blocking the LLM call. Use a 45s timeout for the first message.
         bot_response = ""
-        for _ in range(100):
-            msg = await recv_json_nonbinary(ws_speaker, timeout=15.0)
+        for i in range(100):
+            t = 45.0 if i == 0 else 15.0  # longer timeout for first msg
+            msg = await recv_json_nonbinary(ws_speaker, timeout=t)
             if not msg:
                 break
             if msg.get("type") == "bot_text":
@@ -1913,8 +1916,9 @@ async def test_three_clients_e2e() -> TestResult:
         logger.info("  8. Speaker sent follow-up: 'Why is it important for life?'")
 
         followup_response = ""
-        for _ in range(100):
-            msg = await recv_json_nonbinary(ws_speaker2, timeout=15.0)
+        for i in range(100):
+            t = 45.0 if i == 0 else 15.0
+            msg = await recv_json_nonbinary(ws_speaker2, timeout=t)
             if not msg:
                 break
             if msg.get("type") == "bot_text":

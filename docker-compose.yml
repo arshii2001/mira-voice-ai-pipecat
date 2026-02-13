@@ -97,18 +97,33 @@ services:
   # Automated Voice Pipeline Test Client
   # Speaks RTVI/Protobuf protocol to mira-voice
   # ============================================
-  # Run with: docker compose run --rm test-voice
-  # Or:       docker compose run --rm test-voice --test greeting
-  # Or:       docker compose run --rm test-voice --test bargein --verbose
+  #
+  # Local tests (against Docker mira-voice):
+  #   docker compose run --rm test-voice tests/run_all_tests.py
+  #
+  # OSS regression (against mira-oss.inf7ks8.com — Svara TTS + OSS LLM):
+  #   docker compose run --rm test-oss
+  #
+  # ElevenLabs regression (against mira-ai.westus2.cloudapp.azure.com):
+  #   docker compose run --rm test-elevenlabs
+  #
+  # Individual tests:
+  #   docker compose run --rm test-voice tests/test_text_mode.py --test roundtrip_text --verbose
+  #   docker compose run --rm test-oss tests/test_classroom_mode.py --test all --verbose
+  #
   test-voice:
     build:
       context: .
       dockerfile: tests/Dockerfile
     container_name: mira-test-voice
+    env_file:
+      - .env
     environment:
       - PIPECAT_WS_URL=ws://mira-voice:7860/ws
       - PIPECAT_HTTP_URL=http://mira-voice:7860
       - CLASSROOM_WS_URL=ws://mira-voice:7860/classroom/rooms
+      # Shared JWT secret — must match mira-voice for test auth
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
     networks:
       - mira-network
     depends_on:
@@ -116,6 +131,40 @@ services:
         condition: service_healthy
     profiles:
       - test  # Only runs when explicitly requested
+
+  # ── OSS Regression Target (Svara TTS + OSS LLM) ──────────────
+  # DEFAULT regression target — run this regularly
+  test-oss:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    container_name: mira-test-oss
+    entrypoint: ["python", "tests/run_all_tests.py", "--target", "oss"]
+    env_file:
+      - .env
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    networks:
+      - mira-network
+    profiles:
+      - test
+
+  # ── ElevenLabs Regression Target (GPT-4o-mini + ElevenLabs) ──
+  # Run occasionally to verify ElevenLabs deployment
+  test-elevenlabs:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    container_name: mira-test-elevenlabs
+    entrypoint: ["python", "tests/run_all_tests.py", "--target", "elevenlabs"]
+    env_file:
+      - .env
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    networks:
+      - mira-network
+    profiles:
+      - test
 
   # ============================================
   # Cypress E2E UI Tests

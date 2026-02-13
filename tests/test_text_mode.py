@@ -177,13 +177,16 @@ class ModeTestClient:
         )
         logger.info("Connected")
 
-    async def send_config(self, mode: str = None, system_prompt: str = None):
+    async def send_config(self, mode: str = None, system_prompt: str = None,
+                          enable_greeting: bool = True, language: str = None):
         """Send a config message to set mode."""
-        config = {"type": "config"}
+        config = {"type": "config", "enable_greeting": enable_greeting}
         if mode is not None:
             config["mode"] = mode
         if system_prompt is not None:
             config["system_prompt"] = system_prompt
+        if language is not None:
+            config["language"] = language
         token = _make_jwt()
         if token:
             config["token"] = token
@@ -299,14 +302,13 @@ async def test_default_mode() -> TestResult:
     client = ModeTestClient()
     try:
         await client.connect()
-        # When auth is enabled, we must send a config with token even for default mode
+        # Send config with enable_greeting so the server generates a greeting
+        config = {"type": "config", "enable_greeting": True}
         token = _make_jwt()
         if token:
-            await client.ws.send(json.dumps({"type": "config", "token": token}))
-            logger.info("Sent minimal config with JWT token — waiting for greeting audio...")
-        else:
-            # Do NOT send any config message — should default to text_and_audio
-            logger.info("No config sent — waiting for greeting audio...")
+            config["token"] = token
+        await client.ws.send(json.dumps(config))
+        logger.info("Sent config with enable_greeting — waiting for greeting audio...")
         await client.receive(duration=15.0)
 
         got_audio = client.audio_chunks > 0
@@ -497,6 +499,7 @@ async def test_roundtrip_text_only() -> TestResult:
         await client.send_config(
             mode="text_only",
             system_prompt="You are a helpful assistant. Reply in one short sentence.",
+            language="hi",  # test audio is Hindi (user_greeting.wav)
         )
 
         # Wait for greeting text
@@ -574,6 +577,7 @@ async def test_roundtrip_text_and_audio() -> TestResult:
         await client.send_config(
             mode="text_and_audio",
             system_prompt="You are a helpful assistant. Reply in one short sentence.",
+            language="hi",  # test audio is Hindi (user_greeting.wav)
         )
 
         # Wait for greeting

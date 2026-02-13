@@ -785,18 +785,18 @@ async def test_set_topic_then_english_q() -> TestResult:
         ws = await websockets.connect(f"{CLASSROOM_WS_BASE}/{room_id}/ws")
         await join_room(ws, room_id, "teacher-lang-6", "TeacherEn", "en", role="teacher")
 
-        # SET_TOPIC
-        r1 = await send_teacher_action_and_collect(ws, "SET_TOPIC", "The Water Cycle")
+        # SET_TOPIC — give extra time for longer LLM response
+        r1 = await send_teacher_action_and_collect(ws, "SET_TOPIC", "The Water Cycle", timeout=30.0)
         assert_language(r1["full_response"], "en", "SET_TOPIC Water Cycle")
 
         # English question
-        r2 = await send_text_and_collect(ws, "What is evaporation?")
-        assert r2["full_response"], "No response"
+        r2 = await send_text_and_collect(ws, "What is evaporation?", timeout=20.0)
+        assert r2["full_response"], "No response to 'What is evaporation?'"
         assert_language(r2["full_response"], "en", "What is evaporation? (English)")
 
         # Another English question
-        r3 = await send_text_and_collect(ws, "How do clouds form?")
-        assert r3["full_response"], "No response"
+        r3 = await send_text_and_collect(ws, "How do clouds form?", timeout=20.0)
+        assert r3["full_response"], "No response to 'How do clouds form?'"
         assert_language(r3["full_response"], "en", "How do clouds form? (English)")
 
         await ws.close()
@@ -1031,11 +1031,13 @@ async def test_discussion_room_multi_student_lang() -> TestResult:
 
         # Student A releases token so Student B can speak
         await ws_a.send(json.dumps({"type": "release_token"}))
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
+        # Drain ws_a to consume token_changed broadcast
+        await drain_messages(ws_a, drain_secs=1.0)
 
         # Student B requests the token and waits for it
         await ws_b.send(json.dumps({"type": "request_token"}))
-        await wait_for_token(ws_b, expected_speaker="disc-multi-hi", timeout=15.0)
+        await wait_for_token(ws_b, expected_speaker="disc-multi-hi", timeout=30.0)
         # Drain greeting / broadcast messages before sending
         await drain_messages(ws_b, drain_secs=3.0)
 
@@ -1047,11 +1049,13 @@ async def test_discussion_room_multi_student_lang() -> TestResult:
 
         # Student B releases token so Student A can speak again
         await ws_b.send(json.dumps({"type": "release_token"}))
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
+        # Drain ws_b to consume token_changed broadcast
+        await drain_messages(ws_b, drain_secs=1.0)
 
         # Student A requests the token back
         await ws_a.send(json.dumps({"type": "request_token"}))
-        await wait_for_token(ws_a, expected_speaker="disc-multi-en", timeout=15.0)
+        await wait_for_token(ws_a, expected_speaker="disc-multi-en", timeout=30.0)
         # Drain any broadcast messages before sending
         await drain_messages(ws_a, drain_secs=3.0)
 

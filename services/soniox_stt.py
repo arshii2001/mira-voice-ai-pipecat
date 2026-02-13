@@ -9,6 +9,7 @@ KEY FEATURES:
 - Language identification across 50+ languages
 - Endpoint detection for utterance segmentation
 - Barge-in support
+- Clarity scoring — heuristic quality signal per utterance
 
 Server protocol:
 1. Connect to WebSocket endpoint: wss://stt-rt.soniox.com/transcribe-websocket
@@ -22,6 +23,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List
 
@@ -101,7 +103,12 @@ class SonioxSTTService(FrameProcessor):
     - When user interrupts during bot speech:
       1. StartInterruptionFrame cancels TTS/LLM
       2. STT continues listening (connection stays open)
-      3. New user speech is processed immediately
+
+    CLARITY SCORING:
+    - Each final transcription gets a heuristic clarity score (0.0–1.0)
+    - Score is attached to the TranscriptionFrame as ``clarity_score``
+    - Downstream processors (STTClarityGate) use this to decide whether
+      to pass the transcription to the LLM or ask for clarification
 
     This processor:
     - Receives InputAudioRawFrame from the transport
@@ -109,6 +116,9 @@ class SonioxSTTService(FrameProcessor):
     - Emits TranscriptionFrame and InterimTranscriptionFrame
     - Handles interruptions without connection reset
     """
+
+    # Pre-compiled regex for filler word detection in clarity scoring
+    _FILLER_RE = re.compile(r'^(uh|um|hmm|hm|ah|oh|er|erm)$', re.IGNORECASE)
 
     def __init__(
         self,
@@ -170,6 +180,16 @@ class SonioxSTTService(FrameProcessor):
         self._muted = False
         self._keepalive_task: Optional[asyncio.Task] = None
         self._pipeline_stopped = False
+
+        # Clarity scoring state — tracks per-utterance quality signals
+        self._speech_start_time: float = 0.0  # monotonic time when user started speaking
+        self._audio_bytes_sent: int = 0       # bytes of audio sent for current utterance
+        self._utterance_token_count: int = 0  # number of tokens in current final result
+
+        # Clarity metrics (cumulative across session)
+        self._clarity_total_utterances: int = 0
+        self._clarity_low_count: int = 0
+        self._clarity_scores: list[float] = []
 
     @staticmethod
     def _normalize_lang_code(lang: Optional[str]) -> Optional[str]:
@@ -266,6 +286,73 @@ class SonioxSTTService(FrameProcessor):
             return True
 
         return False
+
+    def _compute_clarity_score(self, text: str, tokens: list, speech_duration_s: float) -> float:
+        """Compute a heuristic clarity score (0.0–1.0) for a final transcription.
+
+        Soniox's realtime API does not expose per-token confidence scores,
+        so we use surrogate signals that correlate with transcription quality:
+
+        1. **Word count** — very short utterances (1 word) from multi-second
+           speech often indicate the STT only caught a fragment.
+        2. **Speech-to-text ratio** — if the user spoke for 5 seconds but STT
+           produced only 2 words, something was lost (expected ~2-3 words/sec
+           for conversational speech).
+        3. **Token density** — Soniox tokens include timing info. Very few
+           tokens relative to speech duration suggests dropped content.
+        4. **Repetition / filler** — repeated single characters or filler
+           sounds ("uh", "um", "hmm") indicate unclear speech.
+
+        Returns a score in [0.0, 1.0] where:
+          - >= 0.75: High clarity — proceed normally
+          - 0.50–0.75: Medium clarity — proceed but log a warning
+          - < 0.50: Low clarity — should ask for clarification
+        """
+        score = 1.0
+        words = text.split()
+        word_count = len(words)
+
+        # ── Signal 1: Very short utterance ──
+        # Single-word transcriptions from >1.5s of speech are suspicious
+        if word_count <= 1 and speech_duration_s > 1.5:
+            score -= 0.35
+        elif word_count <= 2 and speech_duration_s > 3.0:
+            score -= 0.25
+
+        # ── Signal 2: Speech-to-text ratio ──
+        # Conversational speech is ~2-3 words/sec. If ratio is very low,
+        # the STT likely missed content.
+        if speech_duration_s > 0.5:
+            words_per_sec = word_count / speech_duration_s
+            if words_per_sec < 0.5:  # Less than 0.5 words/sec is very sparse
+                score -= 0.30
+            elif words_per_sec < 1.0:  # Less than 1 word/sec is sparse
+                score -= 0.15
+
+        # ── Signal 3: Filler / repetition detection ──
+        # Single-char words (excluding common ones like "I", "a") or
+        # repeated tokens suggest garbled speech
+        filler_count = sum(1 for w in words if self._FILLER_RE.match(w))
+        if word_count > 0 and filler_count / word_count > 0.5:
+            score -= 0.25
+
+        # ── Signal 4: Very short text from long speech ──
+        # If user spoke for >3 seconds but text is <10 chars, likely garbled
+        if speech_duration_s > 3.0 and len(text) < 10:
+            score -= 0.20
+
+        # ── Signal 5: Token timing gaps ──
+        # If Soniox returned tokens with very large gaps, content was likely lost
+        if len(tokens) >= 2:
+            total_duration_ms = 0
+            for t in tokens:
+                total_duration_ms += t.get("duration_ms", 0)
+            if speech_duration_s > 0 and total_duration_ms > 0:
+                coverage = (total_duration_ms / 1000.0) / speech_duration_s
+                if coverage < 0.3:  # Tokens cover less than 30% of speech
+                    score -= 0.20
+
+        return max(0.0, min(1.0, score))
 
     async def start(self, frame: StartFrame):
         """Start the STT service. Connect eagerly for lower first-turn latency."""
@@ -580,14 +667,38 @@ class SonioxSTTService(FrameProcessor):
                 lang_label = LANG_LABELS.get(lang, "English")
                 tagged_text = f"[User is speaking {lang_label}] {formatted_text}"
 
-                await self.push_frame(
-                    TranscriptionFrame(
-                        text=tagged_text,
-                        user_id="",
-                        timestamp="",
-                        language=lang,
-                    )
+                # ── Clarity scoring ──
+                speech_duration_s = 0.0
+                if self._speech_start_time > 0:
+                    speech_duration_s = time.monotonic() - self._speech_start_time
+                clarity_score = self._compute_clarity_score(
+                    formatted_text, tokens, speech_duration_s
                 )
+                self._clarity_total_utterances += 1
+                self._clarity_scores.append(clarity_score)
+                if clarity_score < 0.50:
+                    self._clarity_low_count += 1
+
+                logger.info(
+                    f"[STT_CLARITY] score={clarity_score:.2f} | "
+                    f"words={len(formatted_text.split())} | "
+                    f"speech_dur={speech_duration_s:.1f}s | "
+                    f"text='{formatted_text[:60]}' | "
+                    f"low_rate={self._clarity_low_count}/{self._clarity_total_utterances}"
+                )
+
+                frame = TranscriptionFrame(
+                    text=tagged_text,
+                    user_id="",
+                    timestamp="",
+                    language=lang,
+                )
+                # Attach clarity score as an extra attribute so downstream
+                # processors can gate on it without modifying Pipecat internals.
+                frame.clarity_score = clarity_score
+                frame.raw_text = formatted_text  # untagged text for echo-back
+
+                await self.push_frame(frame)
                 # Prevent stale language from carrying into a later utterance.
                 self._detected_language = None
                 self._last_logged_raw_language = None
@@ -654,6 +765,9 @@ class SonioxSTTService(FrameProcessor):
         # === User Speaking State ===
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._user_speaking = True
+            # Track speech start for clarity scoring
+            self._speech_start_time = time.monotonic()
+            self._audio_bytes_sent = 0
             # Reset per-utterance language state to avoid stale carry-over.
             self._detected_language = None
             self._last_logged_raw_language = None
@@ -729,6 +843,7 @@ class SonioxSTTService(FrameProcessor):
 
             # Send audio to Soniox
             await ws.send(audio_bytes)
+            self._audio_bytes_sent += len(audio_bytes)
             logger.debug(f"Sent {len(audio_bytes)} bytes of audio to Soniox")
 
         except websockets.ConnectionClosed:
