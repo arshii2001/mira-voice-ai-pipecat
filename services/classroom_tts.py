@@ -134,7 +134,12 @@ class ElevenLabsClassroomTTS:
 
 
 class SvaraClassroomTTS:
-    """Classroom TTS adapter backed by SvaraTTSService."""
+    """Classroom TTS adapter that calls Svara WS directly (blocking).
+
+    Unlike the pipeline SvaraTTSService (which is async/non-blocking),
+    this class is used outside the Pipecat pipeline for classroom listeners
+    and needs to yield audio frames directly from the generator.
+    """
 
     def __init__(
         self,
@@ -144,6 +149,11 @@ class SvaraClassroomTTS:
         sample_rate: int = 24000,
     ):
         self._sample_rate = sample_rate
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._ws_url = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
+        self._voice = voice
+        # Create a lightweight SvaraTTSService just for its helper methods
         self._service = SvaraTTSService(
             base_url=base_url,
             api_key=api_key or None,
@@ -157,12 +167,15 @@ class SvaraClassroomTTS:
         )
 
     async def run_tts(self, text: str) -> AsyncGenerator[AudioChunk, None]:
-        """Synthesize text via Svara and yield normalized AudioChunk objects."""
+        """Synthesize text via Svara WS and yield AudioChunk objects (blocking)."""
         if not text.strip():
             return
 
+        import time as _time
+        t0 = _time.monotonic()
+
         try:
-            async for frame in self._service.run_tts(text):
+            async for frame in self._service._svara_ws_stream(text, t0):
                 if hasattr(frame, "audio") and frame.audio:
                     yield AudioChunk(
                         audio=frame.audio,
