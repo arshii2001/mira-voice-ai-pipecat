@@ -293,6 +293,43 @@ VOICE_TEST_CASES = [
         relevance_keywords=["fraction", "decimal", "point", "part", "number"],
     ),
 
+    # ── English LONG-RESPONSE questions (force 4+ sentences) ──
+    VoiceTestCase(
+        "en_long_photosynthesis", "Long: explain photosynthesis with analogy",
+        "Can you explain photosynthesis to me with a fun analogy?",
+        lang="en", user_name="Meera", topic="Photosynthesis", category="english_long",
+        expected_transcription="can you explain photosynthesis to me with a fun analogy",
+        relevance_keywords=["photosynthesis", "sunlight", "plant", "food"],
+    ),
+    VoiceTestCase(
+        "en_long_digestive", "Long: digestive system step by step",
+        "What happens to food after I eat it? Tell me step by step.",
+        lang="en", user_name="Aarav", topic="Digestive System", category="english_long",
+        expected_transcription="what happens to food after i eat it tell me step by step",
+        relevance_keywords=["stomach", "digest", "food", "intestine", "mouth", "enzyme"],
+    ),
+    VoiceTestCase(
+        "en_long_water_cycle", "Long: water cycle detailed",
+        "Explain the complete water cycle from the ocean to rain and back again.",
+        lang="en", user_name="Diya", topic="Water Cycle", category="english_long",
+        expected_transcription="explain the complete water cycle from the ocean to rain and back again",
+        relevance_keywords=["evaporation", "condensation", "rain", "cloud", "ocean", "water"],
+    ),
+    VoiceTestCase(
+        "en_long_gravity", "Long: gravity with examples",
+        "Why does gravity exist and what would happen if there was no gravity on Earth?",
+        lang="en", user_name="Rohan", topic="Physics", category="english_long",
+        expected_transcription="why does gravity exist and what would happen if there was no gravity on earth",
+        relevance_keywords=["gravity", "earth", "float", "pull", "force", "fall"],
+    ),
+    VoiceTestCase(
+        "en_long_fractions", "Long: fractions with pizza example",
+        "I still don't get fractions. Can you explain with a real life example like pizza or cake?",
+        lang="en", user_name="Ravi", topic="Fractions", category="english_long",
+        expected_transcription="i still don't get fractions can you explain with a real life example like pizza or cake",
+        relevance_keywords=["fraction", "pizza", "cake", "piece", "part", "whole", "half"],
+    ),
+
     # ── Hindi questions (gTTS) ──
     VoiceTestCase(
         "hi_science", "Hindi science question",
@@ -589,11 +626,16 @@ class VoiceEvalClient:
         last_audio_at = None
         bot_audio_bytes = 0
         bot_audio_chunks = 0
+        bot_audio_raw = bytearray()   # Accumulate raw PCM for WAV saving
         transcriptions = []           # From user_transcript JSON messages
         proto_transcriptions = []     # From protobuf transcription frames
         bot_text_tokens = []          # Streaming bot_text tokens
         bot_text_complete = None       # Final complete text
         all_json_messages = []
+
+        # ── Per-chunk timing for audio segment analysis ──
+        audio_chunk_times = []         # (timestamp, chunk_bytes) for each audio chunk
+        text_token_times = []          # (timestamp, token_text) for each bot_text token
 
         response_deadline = time.time() + 50.0
         no_data_count = 0
@@ -619,7 +661,9 @@ class VoiceEvalClient:
                 if parsed["type"] == "audio":
                     bot_audio_chunks += 1
                     bot_audio_bytes += parsed["length"]
+                    bot_audio_raw.extend(parsed["data"])
                     now = time.time()
+                    audio_chunk_times.append((now, parsed["length"]))
                     if first_audio_at is None:
                         first_audio_at = now
                     last_audio_at = now
@@ -646,7 +690,9 @@ class VoiceEvalClient:
                             logger.info(f"  🎤 STT interim: '{text}'")
 
                     elif msg_type == "bot_text":
-                        bot_text_tokens.append(data.get("text", ""))
+                        token = data.get("text", "")
+                        bot_text_tokens.append(token)
+                        text_token_times.append((time.time(), token))
 
                     elif msg_type == "bot_text_complete":
                         bot_text_complete = data.get("text", "")
@@ -664,9 +710,75 @@ class VoiceEvalClient:
         ttfab_ms = round((first_audio_at - speech_done_time) * 1000) if first_audio_at else -1
         total_rt_ms = round((last_audio_at - send_start) * 1000) if last_audio_at else -1
 
+        # ── 4b. Audio segment analysis (detect sentence boundaries by gaps) ──
+        audio_segments = []
+        if len(audio_chunk_times) >= 2:
+            GAP_THRESHOLD_SEC = 0.15  # 150ms gap = new segment (sentence boundary)
+            seg_start_t = audio_chunk_times[0][0]
+            seg_chunks = 1
+            seg_bytes = audio_chunk_times[0][1]
+            for i in range(1, len(audio_chunk_times)):
+                gap = audio_chunk_times[i][0] - audio_chunk_times[i - 1][0]
+                if gap > GAP_THRESHOLD_SEC:
+                    # End of segment
+                    seg_dur = audio_chunk_times[i - 1][0] - seg_start_t
+                    seg_audio_dur = seg_bytes / (24000 * 2)
+                    audio_segments.append({
+                        "seg": len(audio_segments) + 1,
+                        "chunks": seg_chunks,
+                        "bytes": seg_bytes,
+                        "audio_sec": round(seg_audio_dur, 2),
+                        "recv_sec": round(seg_dur, 2),
+                        "gap_after_ms": round(gap * 1000),
+                    })
+                    seg_start_t = audio_chunk_times[i][0]
+                    seg_chunks = 1
+                    seg_bytes = audio_chunk_times[i][1]
+                else:
+                    seg_chunks += 1
+                    seg_bytes += audio_chunk_times[i][1]
+            # Final segment
+            seg_dur = audio_chunk_times[-1][0] - seg_start_t
+            seg_audio_dur = seg_bytes / (24000 * 2)
+            audio_segments.append({
+                "seg": len(audio_segments) + 1,
+                "chunks": seg_chunks,
+                "bytes": seg_bytes,
+                "audio_sec": round(seg_audio_dur, 2),
+                "recv_sec": round(seg_dur, 2),
+                "gap_after_ms": 0,
+            })
+        elif len(audio_chunk_times) == 1:
+            audio_segments.append({
+                "seg": 1, "chunks": 1, "bytes": audio_chunk_times[0][1],
+                "audio_sec": round(audio_chunk_times[0][1] / (24000 * 2), 2),
+                "recv_sec": 0, "gap_after_ms": 0,
+            })
+
+        # ── 4c. Text token stats ──
+        text_first_token_ms = -1
+        text_last_token_ms = -1
+        text_token_count = len(text_token_times)
+        if text_token_times:
+            text_first_token_ms = round((text_token_times[0][0] - speech_done_time) * 1000)
+            text_last_token_ms = round((text_token_times[-1][0] - speech_done_time) * 1000)
+
+        # ── Print detailed segment stats ──
+        if audio_segments:
+            logger.info(f"  📊 Audio segments: {len(audio_segments)} | Text tokens: {text_token_count}")
+            for seg in audio_segments:
+                gap_str = f" → gap {seg['gap_after_ms']}ms" if seg['gap_after_ms'] > 0 else ""
+                logger.info(
+                    f"     Seg {seg['seg']}: {seg['chunks']} chunks, "
+                    f"{seg['audio_sec']}s audio, recv in {seg['recv_sec']}s{gap_str}"
+                )
+        if text_token_count > 0:
+            logger.info(f"  📝 Text: first token at {text_first_token_ms}ms, last at {text_last_token_ms}ms ({text_token_count} tokens)")
+
         logger.info(
             f"  ✅ TTFAB={ttfab_ms}ms | RT={total_rt_ms}ms | "
             f"Audio={bot_audio_sec}s ({bot_audio_chunks} chunks) | "
+            f"Segments={len(audio_segments)} | "
             f"STT={'✓' if stt_text else '✗'} | "
             f"BotText={'✓' if bot_text else '✗'}"
         )
@@ -677,6 +789,11 @@ class VoiceEvalClient:
             "bot_audio_bytes": bot_audio_bytes,
             "bot_audio_chunks": bot_audio_chunks,
             "bot_audio_duration_sec": bot_audio_sec,
+            "bot_audio_raw": bytes(bot_audio_raw),
+            "audio_segments": audio_segments,
+            "text_token_count": text_token_count,
+            "text_first_token_ms": text_first_token_ms,
+            "text_last_token_ms": text_last_token_ms,
             "ttfab_ms": ttfab_ms,
             "total_rt_ms": total_rt_ms,
             "all_json_messages": all_json_messages,
@@ -764,9 +881,11 @@ def score_color(score):
 # ─────────────────────────────────────────────────
 # Main runner
 # ─────────────────────────────────────────────────
-async def run_all(ws_url: str, audio_dir: str, target_name: str, run_judge: bool = True):
+async def run_all(ws_url: str, audio_dir: str, target_name: str, run_judge: bool = True, limit: int = None):
     """Run all voice test cases and report results."""
     auth_status = "JWT ✓" if WEBUI_SECRET_KEY else "no auth"
+
+    active_tests = VOICE_TEST_CASES[:limit] if limit else VOICE_TEST_CASES
 
     print("╔══════════════════════════════════════════════════════════════╗")
     print("║       MIRA VOICE EVAL v2 — End-to-End Audio Pipeline       ║")
@@ -775,7 +894,7 @@ async def run_all(ws_url: str, audio_dir: str, target_name: str, run_judge: bool
     print(f"║  WS:     {ws_url:<50} ║")
     print(f"║  Auth:   {auth_status:<50} ║")
     print(f"║  Judge:  {JUDGE_MODEL if run_judge else 'DISABLED':<50} ║")
-    print(f"║  Tests:  {len(VOICE_TEST_CASES):<50} ║")
+    print(f"║  Tests:  {len(active_tests):<50} ║")
     print(f"║  Mode:   {'Single session (multi-turn)':<50} ║")
     print("╚══════════════════════════════════════════════════════════════╝\n")
 
@@ -783,8 +902,8 @@ async def run_all(ws_url: str, audio_dir: str, target_name: str, run_judge: bool
 
     # ── Strategy: Run tests in batches sharing a single WebSocket ──
     # Group by language to avoid language switching mid-session
-    en_tests = [t for t in VOICE_TEST_CASES if t.lang == "en"]
-    hi_tests = [t for t in VOICE_TEST_CASES if t.lang == "hi"]
+    en_tests = [t for t in active_tests if t.lang == "en"]
+    hi_tests = [t for t in active_tests if t.lang == "hi"]
 
     for batch_label, batch_tests, batch_lang in [
         ("English", en_tests, "en"),
@@ -838,6 +957,77 @@ async def run_all(ws_url: str, audio_dir: str, target_name: str, run_judge: bool
                 result.bot_audio_duration_sec = turn_data["bot_audio_duration_sec"]
                 result.ttfab_ms = turn_data["ttfab_ms"]
                 result.total_rt_ms = turn_data["total_rt_ms"]
+
+                # ── Save bot audio as WAV file ──
+                raw_pcm = turn_data.get("bot_audio_raw", b"")
+                if raw_pcm:
+                    wav_out_dir = f"tests/eval_audio_output/{target_name}"
+                    os.makedirs(wav_out_dir, exist_ok=True)
+                    wav_path = os.path.join(wav_out_dir, f"{test.id}_turn{client.turn_count}.wav")
+                    try:
+                        with wave.open(wav_path, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)  # PCM16
+                            wf.setframerate(24000)  # Bot audio is 24kHz
+                            wf.writeframes(raw_pcm)
+                        logger.info(f"  💾 Saved audio: {wav_path} ({len(raw_pcm)/(24000*2):.1f}s)")
+                    except Exception as e:
+                        logger.warning(f"  ⚠️  Failed to save audio: {e}")
+
+                    # ── Quick waveform analysis for clicks/gaps ──
+                    try:
+                        arr = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32)
+                        # Detect silence gaps (>100ms of near-zero amplitude)
+                        window_ms = 100
+                        window_samples = int(24000 * window_ms / 1000)
+                        silence_threshold = 200  # ~-50dB for int16
+                        gaps = []
+                        gap_start = None
+                        for s in range(0, len(arr) - window_samples, window_samples // 2):
+                            window = arr[s:s + window_samples]
+                            if np.max(np.abs(window)) < silence_threshold:
+                                if gap_start is None:
+                                    gap_start = s
+                            else:
+                                if gap_start is not None:
+                                    gap_dur_ms = (s - gap_start) / 24000 * 1000
+                                    if gap_dur_ms >= 150:  # Only report gaps >= 150ms
+                                        gap_at_sec = gap_start / 24000
+                                        gaps.append((gap_at_sec, gap_dur_ms))
+                                    gap_start = None
+                        # Check for clicks (sudden large amplitude spikes)
+                        diff = np.abs(np.diff(arr))
+                        click_threshold = 20000  # Large sudden jump
+                        click_indices = np.where(diff > click_threshold)[0]
+                        clicks = [idx / 24000 for idx in click_indices]
+
+                        if gaps:
+                            print(f"  🔇 Silence gaps detected: {len(gaps)}")
+                            for gap_at, gap_dur in gaps[:5]:
+                                print(f"      at {gap_at:.2f}s — {gap_dur:.0f}ms gap")
+                        if clicks:
+                            print(f"  ⚡ Potential clicks detected: {len(clicks)}")
+                            for c in clicks[:5]:
+                                print(f"      at {c:.3f}s")
+                        if not gaps and not clicks:
+                            print(f"  ✅ Audio waveform: no gaps or clicks detected")
+                    except Exception as e:
+                        logger.debug(f"  Waveform analysis error: {e}")
+
+                # ── Print audio segment & text token stats ──
+                segments = turn_data.get("audio_segments", [])
+                if segments:
+                    print(f"  📊 Audio segments (sentence-level):")
+                    for seg in segments:
+                        gap_str = f" → then {seg['gap_after_ms']}ms gap" if seg['gap_after_ms'] > 0 else ""
+                        print(f"      Seg {seg['seg']}: {seg['chunks']:>3} chunks | "
+                              f"{seg['audio_sec']:>5.2f}s audio | "
+                              f"recv {seg['recv_sec']:>5.2f}s{gap_str}")
+                tk_count = turn_data.get("text_token_count", 0)
+                tk_first = turn_data.get("text_first_token_ms", -1)
+                tk_last = turn_data.get("text_last_token_ms", -1)
+                if tk_count > 0:
+                    print(f"  📝 Text tokens: {tk_count} | first at {tk_first}ms | last at {tk_last}ms")
 
                 # STT accuracy
                 if test.expected_transcription and result.transcription:
@@ -1138,6 +1328,10 @@ def main():
         "--audio-dir", default=None,
         help="Directory containing pre-recorded WAV files.",
     )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Max number of test cases to run (useful for quick sanity checks).",
+    )
     args = parser.parse_args()
 
     if args.target:
@@ -1158,7 +1352,7 @@ def main():
         print("⚠️  No JUDGE_API_KEY — running in latency-only mode (no quality scoring)")
         run_judge = False
 
-    asyncio.run(run_all(WS_URL, audio_dir, target_name, run_judge))
+    asyncio.run(run_all(WS_URL, audio_dir, target_name, run_judge, limit=args.limit))
 
 
 if __name__ == "__main__":

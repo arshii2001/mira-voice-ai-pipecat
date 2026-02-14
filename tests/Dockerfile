@@ -33,6 +33,7 @@ COPY tests/test_speech_timing.py /app/tests/
 COPY tests/test_pipeline_smoothness.py /app/tests/
 COPY tests/test_vad_and_speech_detection.py /app/tests/
 COPY tests/test_tts_audio_quality.py /app/tests/
+COPY tests/test_multiturn_timing.py /app/tests/
 COPY tests/run_all_tests.py /app/tests/
 
 # Copy pyproject.toml for pytest config (asyncio_mode = "auto")

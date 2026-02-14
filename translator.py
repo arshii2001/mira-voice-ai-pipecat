@@ -50,6 +50,7 @@ class Translator:
     ):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
+        self._base_url = base_url
 
         # Session-level metrics
         self._call_count: int = 0
@@ -95,10 +96,19 @@ class Translator:
                 ],
                 max_tokens=500,
                 temperature=0.3,  # Low temperature for faithful translation
+                **({"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}} if "api.openai.com" not in self._base_url else {}),
             )
 
             latency_ms = round((time.monotonic() - t0) * 1000, 1)
-            translated = response.choices[0].message.content.strip()
+            raw_content = response.choices[0].message.content
+            if raw_content is None:
+                # Reasoning model may return content=None with reasoning_content only
+                logger.warning(
+                    f"[TRANSLATE] LLM returned content=None for {source_lang}→{target_lang}, "
+                    f"falling back to original text"
+                )
+                return text
+            translated = raw_content.strip()
 
             # Update session metrics
             self._call_count += 1

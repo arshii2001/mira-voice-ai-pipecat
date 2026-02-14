@@ -869,6 +869,9 @@ class RoomManager:
         messages.append({"role": "user", "content": question})
 
         try:
+            # Only send chat_template_kwargs to vLLM (not real OpenAI)
+            _llm_base = os.getenv("LLM_BASE_URL", "")
+            _extra_body = {} if "api.openai.com" in _llm_base else {"chat_template_kwargs": {"enable_thinking": False}}
             stream = await asyncio.wait_for(
                 self._llm_client.chat.completions.create(
                     model=self._llm_model,
@@ -876,6 +879,7 @@ class RoomManager:
                     max_tokens=400,  # Classroom brevity: 1-3 sentences ≈ 50-150 tokens; 400 allows quizzes/summaries
                     temperature=0.7,
                     stream=True,
+                    extra_body=_extra_body if _extra_body else None,
                 ),
                 timeout=30.0,  # 30s to start the stream
             )

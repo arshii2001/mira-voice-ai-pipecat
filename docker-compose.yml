@@ -94,6 +94,82 @@ services:
     restart: unless-stopped
 
   # ============================================
+  # Pipecat Voice Backend — Svara TTS variant
+  # Mirrors the OSS/K8s deployment (Svara TTS + GPT-4o-mini)
+  # for local A/B comparison against ElevenLabs above.
+  #
+  # Start:  docker compose up -d mira-voice-svara open-webui-svara
+  # UI:     http://localhost:3006
+  # Voice:  http://localhost:7861
+  # ============================================
+  mira-voice-svara:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mira-voice-svara
+    ports:
+      - "7861:7860"
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=7860
+      - LOG_LEVEL=DEBUG
+      - CURRICULUM_DIR=/content/curriculum
+      - CURRICULUM_CONTEXT_MAX_TOKENS=600
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      # ── Override TTS to Svara (matches K8s OSS deployment) ──
+      - TTS_PROVIDER=svara
+      - TTS_WS_URL=ws://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream
+      - TTS_WS_API_KEY=${TTS_WS_API_KEY:-}
+      - TTS_SAMPLE_RATE=24000
+      - DEFAULT_VOICE=en_female
+      # ── LLM same as ElevenLabs stack ──
+      - LLM_PROVIDER=openai
+      - LLM_BASE_URL=https://api.openai.com/v1
+      - LLM_MODEL=gpt-4o-mini
+    volumes:
+      - ./prompts:/app/prompts:ro
+      - classroom-data-svara:/app/data
+      - ./content/curriculum:/content/curriculum:ro
+    networks:
+      - mira-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  open-webui-svara:
+    image: mira-voice-ai-pipecat-open-webui
+    container_name: mira-voice-webui-svara
+    ports:
+      - "3006:8080"
+    environment:
+      - PIPECAT_ENABLED=true
+      - PIPECAT_API_URL=http://localhost:7861
+      - PIPECAT_CONNECTION_MODE=websocket
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=false
+      - ENABLE_INITIAL_ADMIN_SIGNUP=true
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_API_BASE_URL=https://api.openai.com/v1
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - open-webui-data-svara:/app/backend/data
+    networks:
+      - mira-network
+    depends_on:
+      mira-voice-svara:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ============================================
   # Automated Voice Pipeline Test Client
   # Speaks RTVI/Protobuf protocol to mira-voice
   # ============================================
@@ -124,6 +200,8 @@ services:
       - CLASSROOM_WS_URL=ws://mira-voice:7860/classroom/rooms
       # Shared JWT secret — must match mira-voice for test auth
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
+    volumes:
+      - ./tests/eval_audio_output:/app/tests/eval_audio_output
     networks:
       - mira-network
     depends_on:
@@ -254,3 +332,5 @@ networks:
 volumes:
   open-webui-data:
   classroom-data:
+  open-webui-data-svara:
+  classroom-data-svara:

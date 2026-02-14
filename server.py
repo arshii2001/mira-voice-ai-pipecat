@@ -248,10 +248,13 @@ async def chat_completion(req: ChatRequest):
             t_first_token = 0.0
             token_count = 0
             async with httpx.AsyncClient(timeout=60.0) as client:
+                _json_body = {"model": model, "messages": messages, "stream": True}
+                if "api.openai.com" not in base_url:
+                    _json_body["chat_template_kwargs"] = {"enable_thinking": False}
                 async with client.stream(
                     "POST",
                     f"{base_url}/chat/completions",
-                    json={"model": model, "messages": messages, "stream": True},
+                    json=_json_body,
                     headers={"Authorization": f"Bearer {api_key}"},
                 ) as resp:
                     async for line in resp.aiter_lines():
@@ -287,9 +290,12 @@ async def chat_completion(req: ChatRequest):
     else:
         t0 = time.time()
         async with httpx.AsyncClient(timeout=60.0) as client:
+            _json_body_ns = {"model": model, "messages": messages, "stream": False}
+            if "api.openai.com" not in base_url:
+                _json_body_ns["chat_template_kwargs"] = {"enable_thinking": False}
             resp = await client.post(
                 f"{base_url}/chat/completions",
-                json={"model": model, "messages": messages, "stream": False},
+                json=_json_body_ns,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             total_ms = round((time.time() - t0) * 1000, 1)

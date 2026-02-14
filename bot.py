@@ -460,6 +460,7 @@ class TextStreamForwarder(FrameProcessor):
         self._current_response = ""
         self._sentence_buffer = ""        # Accumulates tokens until sentence boundary
         self._in_response = False
+        self._needs_space_before_next = False  # Ensure space between sentences for TTS aggregator
 
         # ── Per-receiver sentence queue (text_and_audio only) ──
         # Each sentence is a string.  The queue is consumed by
@@ -619,6 +620,7 @@ class TextStreamForwarder(FrameProcessor):
             self._in_response = True
             self._current_response = ""
             self._sentence_buffer = ""
+            self._needs_space_before_next = False
             self._metrics_total_responses += 1
             self._reset_response_metrics()
             # Drain any leftover from previous response
@@ -647,24 +649,35 @@ class TextStreamForwarder(FrameProcessor):
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, TextFrame) and self._in_response:
-            self._current_response += frame.text
+            token_text = frame.text
+            self._current_response += token_text
+
+            # ── Ensure space between sentences for Pipecat's TTS aggregator ──
+            # LLM tokens like "Why" after "right?" may lack a leading space,
+            # causing Pipecat's NLTK-based aggregator to merge "right?Why"
+            # into one sentence instead of splitting at the "?".
+            if self._needs_space_before_next and token_text and not token_text[0].isspace():
+                frame.text = " " + token_text
+                self._needs_space_before_next = False
+            elif token_text and token_text[0].isspace():
+                self._needs_space_before_next = False
 
             if self._text_only:
                 # ── text_only: stream every token immediately (fast) ──
                 try:
                     await self._websocket.send_json({
                         "type": "bot_text",
-                        "text": frame.text,
+                        "text": token_text,  # Send original text to client
                         "streaming": True,
                     })
-                    logger.debug(f"[TEXT_STREAM] Sent token: '{frame.text}'")
+                    logger.debug(f"[TEXT_STREAM] Sent token: '{token_text}'")
                 except Exception as e:
                     logger.warning(f"[TEXT_STREAM] Failed to send token: {e}")
             else:
                 # ── text_and_audio: buffer tokens, enqueue on sentence boundary ──
                 # Don't send to client yet — TextAudioSyncNotifier will call
                 # release_next_sentence() when TTS starts speaking this sentence.
-                self._sentence_buffer += frame.text
+                self._sentence_buffer += token_text  # Use original text for our buffer
                 if self._SENTENCE_ENDS.search(self._sentence_buffer):
                     sentence = self._sentence_buffer.strip()
                     if sentence:
@@ -675,8 +688,10 @@ class TextStreamForwarder(FrameProcessor):
                         self._start_watchdog()
                         logger.debug(f"[TEXT_STREAM] Queued sentence #{self._metrics_sentences_queued}: '{sentence[:60]}'")
                     self._sentence_buffer = ""
+                    self._needs_space_before_next = True
 
             # Always push downstream (to TTS in audio mode, or to assistant aggregator)
+            # frame.text may have a leading space injected for TTS aggregator
             await self.push_frame(frame, direction)
 
         elif isinstance(frame, LLMFullResponseEndFrame):
@@ -772,10 +787,13 @@ class TextAudioSyncNotifier(FrameProcessor):
             await self._send_complete_if_done()
 
         elif isinstance(frame, LLMFullResponseEndFrame):
-            # Safety net: if TTS didn't emit TTSStartedFrame for some sentences
-            # (e.g. empty text, TTS error), flush remaining text and finalize.
-            fwd = self._text_forwarder
-            await fwd.flush_all_queued()
+            # LLM is done producing text.  Do NOT flush remaining queued
+            # sentences here — they still need to be synthesised by TTS.
+            # The TTSStoppedFrame handler above will call _send_complete_if_done()
+            # after the last sentence's audio finishes.
+            #
+            # However, if the queue is already empty (TTS already processed
+            # everything), we should finalize now.
             await self._send_complete_if_done()
 
         elif isinstance(frame, StartInterruptionFrame):
@@ -1403,10 +1421,19 @@ def create_llm_service():
 
     if provider == "openai":
         logger.info(f"Creating LLM service: OpenAI-compatible (model={LLM_MODEL}, base_url={LLM_BASE_URL})")
+        # Only send chat_template_kwargs to vLLM endpoints (not real OpenAI).
+        # vLLM reasoning models need enable_thinking=False to avoid burning tokens
+        # on reasoning_content before producing actual content tokens.
+        is_openai_native = "api.openai.com" in LLM_BASE_URL
+        extra = {}
+        if not is_openai_native:
+            extra = {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+        llm_params = OpenAILLMService.InputParams(extra=extra)
         return OpenAILLMService(
             api_key=LLM_API_KEY,
             base_url=LLM_BASE_URL,
             model=LLM_MODEL,
+            params=llm_params,
         )
 
     else:

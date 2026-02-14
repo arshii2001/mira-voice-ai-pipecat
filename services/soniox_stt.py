@@ -190,6 +190,13 @@ class SonioxSTTService(FrameProcessor):
         _MAX_RECONNECT_BUFFER = 50  # ~1s of audio at 20ms chunks
         self._MAX_RECONNECT_BUFFER = _MAX_RECONNECT_BUFFER
 
+        # Rate-limit tracking — Soniox returns 429 when too many concurrent
+        # connections are open.  When we detect a 429, we back off proactive
+        # reconnects to avoid burning the quota on idle sessions.
+        self._rate_limited = False
+        self._rate_limit_backoff = 30.0  # seconds to wait after a 429 before retrying
+        self._last_rate_limit_time: float = 0.0  # monotonic timestamp of last 429
+
         # Clarity scoring state — tracks per-utterance quality signals
         self._speech_start_time: float = 0.0  # monotonic time when user started speaking
         self._audio_bytes_sent: int = 0       # bytes of audio sent for current utterance
@@ -372,11 +379,10 @@ class SonioxSTTService(FrameProcessor):
             await self._connect()
             connect_ms = (time.monotonic() - t0) * 1000
             logger.info(f"[SONIOX_TIMING] Eager connect completed in {connect_ms:.0f}ms")
-            # Start idle keepalive to prevent Soniox from dropping the
-            # connection before the user speaks (tutor mode has no greeting,
-            # so no audio flows until the user presses mic).
+            # Start keepalive to prevent Soniox from dropping the connection
+            # during ANY idle gap (before first speech, between turns, etc.).
             self._idle_keepalive_task = asyncio.create_task(self._idle_keepalive_loop())
-            logger.info("[SONIOX_TIMING] Idle keepalive started (pings every 5s until first speech)")
+            logger.info("[SONIOX_TIMING] Keepalive started (pings every 5s during idle gaps)")
         except Exception as e:
             logger.warning(f"Eager Soniox connect failed, will retry on first speech: {e}")
 
@@ -387,6 +393,14 @@ class SonioxSTTService(FrameProcessor):
         if self._idle_keepalive_task and not self._idle_keepalive_task.done():
             self._idle_keepalive_task.cancel()
             self._idle_keepalive_task = None
+        # Send end-of-session signal before disconnecting
+        ws = self._websocket
+        if self._connected and ws is not None:
+            try:
+                await ws.send("")
+                logger.info("Sent end-of-session signal to Soniox")
+            except Exception:
+                pass
         await self._disconnect()
 
     async def cancel(self, frame: CancelFrame):
@@ -435,12 +449,35 @@ class SonioxSTTService(FrameProcessor):
                 try:
                     init_response = await asyncio.wait_for(self._websocket.recv(), timeout=5.0)
                     logger.info(f"Soniox initial response: {init_response}")
+
+                    # Check for 429 rate-limit in initial response
+                    try:
+                        init_data = json.loads(init_response)
+                        if init_data.get("error_code") == 429:
+                            self._rate_limited = True
+                            self._last_rate_limit_time = time.monotonic()
+                            logger.warning(
+                                f"[SONIOX] ⚠️  Rate-limited (429): {init_data.get('error_message', 'unknown')} — "
+                                f"backing off proactive reconnects for {self._rate_limit_backoff}s"
+                            )
+                            # Close this connection immediately — Soniox will drop it anyway
+                            try:
+                                await self._websocket.close()
+                            except Exception:
+                                pass
+                            self._websocket = None
+                            self._connected = False
+                            return  # Don't set connected=True
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Not JSON or not parseable — continue normally
+
                 except asyncio.TimeoutError:
                     logger.warning("No initial response from Soniox (continuing anyway)")
                 except Exception as e:
                     logger.warning(f"Error receiving initial response: {e}")
 
                 self._connected = True
+                self._rate_limited = False  # Successful connection clears rate-limit flag
                 logger.info("Connected to Soniox")
 
                 # Start receiving messages in background
@@ -577,12 +614,30 @@ class SonioxSTTService(FrameProcessor):
                         }
                         await new_ws.send(json.dumps(config))
                         try:
-                            await asyncio.wait_for(new_ws.recv(), timeout=5.0)
+                            init_resp = await asyncio.wait_for(new_ws.recv(), timeout=5.0)
+                            # Check for 429 rate-limit
+                            try:
+                                init_data = json.loads(init_resp)
+                                if init_data.get("error_code") == 429:
+                                    self._rate_limited = True
+                                    self._last_rate_limit_time = time.monotonic()
+                                    logger.warning(
+                                        f"[SONIOX] Auto-reconnect got 429: "
+                                        f"{init_data.get('error_message', 'rate limited')}"
+                                    )
+                                    try:
+                                        await new_ws.close()
+                                    except Exception:
+                                        pass
+                                    continue
+                            except (json.JSONDecodeError, TypeError):
+                                pass
                         except (asyncio.TimeoutError, Exception):
                             pass
                         # Atomically publish the new connection
                         self._websocket = new_ws
                         self._connected = True
+                        self._rate_limited = False
                         reconnect_attempt = 0
                         logger.info("Soniox: auto-reconnect succeeded")
                     except Exception as e:
@@ -804,28 +859,27 @@ class SonioxSTTService(FrameProcessor):
             idle_sec = time.monotonic() - self._pipeline_start_time
             is_first = not self._first_speech_received
 
-            # Cancel idle keepalive — real audio is about to flow
             if is_first:
                 self._first_speech_received = True
-                if self._idle_keepalive_task and not self._idle_keepalive_task.done():
-                    self._idle_keepalive_task.cancel()
-                    self._idle_keepalive_task = None
                 logger.info(
                     f"[SONIOX_TIMING] First speech after {idle_sec:.1f}s idle | "
-                    f"connected={self._connected} | "
-                    f"idle_keepalive_cancelled=True"
+                    f"connected={self._connected}"
                 )
             else:
                 logger.info(
                     f"[SONIOX_TIMING] User speaking (turn) | "
                     f"connected={self._connected}"
                 )
+            # NOTE: Keepalive loop stays running — it auto-pauses when
+            # user_speaking=True and resumes when both user+bot go silent.
 
             # Clear any stale reconnect buffer from a previous utterance
             self._reconnect_buffer.clear()
 
             # Reconnect if not connected. The _receive_messages loop may have
             # exited due to idle timeout, so check if the task is done too.
+            # Always attempt reconnect for real speech, even if rate-limited —
+            # the user is actually talking, so we must try.
             receive_task_dead = (
                 self._receive_task is None or self._receive_task.done()
             )
@@ -869,23 +923,18 @@ class SonioxSTTService(FrameProcessor):
 
         elif isinstance(frame, UserStoppedSpeakingFrame):
             self._user_speaking = False
-            logger.info("User stopped speaking - sending end signal to Soniox")
-
-            # Send empty string to signal end of audio segment
-            ws = self._websocket  # Local ref
-            if self._connected and ws is not None:
-                try:
-                    # Send empty string to finalize current utterance
-                    await ws.send("")
-                    logger.debug("End signal sent to Soniox")
-                except websockets.ConnectionClosed as e:
-                    logger.warning(f"Connection closed when sending end signal: {e}")
-                    self._connected = False
-                    self._websocket = None
-                except Exception as e:
-                    logger.warning(f"Failed to send end signal: {e}")
-            else:
-                logger.warning("Cannot send end signal - not connected to Soniox")
+            logger.info("User stopped speaking (Soniox endpoint detection will finalize)")
+            # NOTE: We intentionally do NOT send "" (empty string) here.
+            # Sending "" tells Soniox "this session is done" and it closes the
+            # connection shortly after. This breaks multi-turn conversations
+            # because subsequent turns need to reconnect (~300ms delay).
+            #
+            # Instead, we rely on Soniox's enable_endpoint_detection (which is
+            # enabled in our config) to detect utterance boundaries from the
+            # silence that follows the user's speech. The VAD stop_secs (1.0s)
+            # ensures enough silence for Soniox to finalize the utterance.
+            #
+            # The "" signal is only sent in stop() when the pipeline ends.
 
             await self.push_frame(frame, direction)
 
@@ -993,51 +1042,120 @@ class SonioxSTTService(FrameProcessor):
             pass
 
     async def _idle_keepalive_loop(self):
-        """Send periodic silence to keep Soniox alive BEFORE the user speaks.
+        """Send periodic silence to keep Soniox alive during ALL idle gaps.
 
-        In tutor mode (no greeting), the Soniox connection is opened eagerly
-        but no audio flows until the user presses the mic and starts talking.
-        Soniox's server drops idle connections after ~30s, so we send a tiny
-        silence ping every 5s to keep it alive.
+        Soniox's server drops idle connections after ~10-30s. This loop sends
+        a tiny silence ping every 5s to keep the connection alive.
 
-        This loop runs from start() until the first UserStartedSpeakingFrame,
-        at which point real audio takes over and this loop is cancelled.
+        It runs continuously from pipeline start until the pipeline stops.
+        It pauses itself when the user or bot is actively speaking (real audio
+        keeps the connection alive), and resumes when both go silent.
+
+        RATE-LIMIT AWARENESS (429):
+        When Soniox returns a 429 (max concurrent requests), we stop proactive
+        reconnects for a backoff period. This prevents the tight reconnect loop
+        that was burning through Soniox's concurrent connection quota on idle
+        sessions. The connection will be re-established on-demand when the user
+        actually starts speaking (UserStartedSpeakingFrame).
         """
         silence_samples = int(0.1 * self._config.sample_rate)  # 100ms of silence
         silence = np.zeros(silence_samples, dtype=np.int16)
         silence_bytes = silence.tobytes()
 
         ping_count = 0
+        consecutive_reconnect_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 3  # Stop proactive reconnects after 3 failures
         try:
-            while not self._first_speech_received and not self._pipeline_stopped:
+            while not self._pipeline_stopped:
                 await asyncio.sleep(5.0)  # Ping every 5 seconds
+
+                # Skip pinging when real audio is flowing — it's unnecessary
+                # and would just add noise to the stream.
+                if self._user_speaking or self._bot_speaking:
+                    consecutive_reconnect_failures = 0  # Reset on real activity
+                    continue
+
                 ws = self._websocket
                 if self._connected and ws is not None:
                     try:
                         await ws.send(silence_bytes)
                         ping_count += 1
-                        idle_sec = time.monotonic() - self._pipeline_start_time
-                        logger.info(
-                            f"[SONIOX_TIMING] Idle keepalive ping #{ping_count} "
-                            f"({idle_sec:.1f}s since start) — Soniox alive ✅"
-                        )
+                        consecutive_reconnect_failures = 0  # Reset on success
+                        # Only log every 10th ping to reduce log spam
+                        if ping_count % 10 == 1:
+                            idle_sec = time.monotonic() - self._pipeline_start_time
+                            logger.info(
+                                f"[SONIOX_TIMING] Keepalive ping #{ping_count} "
+                                f"({idle_sec:.1f}s since start) — Soniox alive ✅"
+                            )
                     except websockets.ConnectionClosed:
                         logger.warning(
-                            f"[SONIOX_TIMING] ⚠️  Idle keepalive: Soniox dropped connection "
-                            f"after {ping_count} pings"
+                            f"[SONIOX_TIMING] ⚠️  Keepalive: Soniox dropped connection "
+                            f"after {ping_count} pings — will reconnect on next speech"
                         )
                         self._connected = False
                         self._websocket = None
-                        break
+                        # Don't break — stay in loop. If the connection is
+                        # re-established (e.g. by UserStartedSpeakingFrame),
+                        # keepalive should resume.
                     except Exception as e:
-                        logger.warning(f"Soniox idle keepalive error: {e}")
+                        logger.warning(f"Soniox keepalive error: {e}")
                 elif not self._connected:
-                    logger.warning(
-                        "[SONIOX_TIMING] ⚠️  Idle keepalive: not connected, cannot ping"
+                    # ── Rate-limit guard ──
+                    # If we recently got a 429, don't try to reconnect proactively.
+                    # Wait for the backoff period to expire, or for the user to
+                    # actually start speaking (which triggers on-demand reconnect).
+                    if self._rate_limited:
+                        since_rate_limit = time.monotonic() - self._last_rate_limit_time
+                        if since_rate_limit < self._rate_limit_backoff:
+                            remaining = self._rate_limit_backoff - since_rate_limit
+                            logger.debug(
+                                f"[SONIOX] Skipping proactive reconnect — rate-limited, "
+                                f"{remaining:.0f}s remaining in backoff"
+                            )
+                            continue
+                        else:
+                            logger.info(
+                                f"[SONIOX] Rate-limit backoff expired ({since_rate_limit:.0f}s), "
+                                f"allowing proactive reconnect"
+                            )
+                            self._rate_limited = False
+
+                    # ── Consecutive failure guard ──
+                    if consecutive_reconnect_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.info(
+                            f"[SONIOX] Skipping proactive reconnect — "
+                            f"{consecutive_reconnect_failures} consecutive failures, "
+                            f"waiting for user speech to trigger on-demand reconnect"
+                        )
+                        continue
+
+                    # Not connected and idle — try to reconnect proactively
+                    # so the user doesn't pay the reconnect cost on next speech.
+                    logger.info(
+                        "[SONIOX_TIMING] Keepalive: not connected, attempting proactive reconnect..."
                     )
+                    try:
+                        await self._connect()
+                        if self._connected:
+                            logger.info("[SONIOX_TIMING] Keepalive: proactive reconnect succeeded ✅")
+                            consecutive_reconnect_failures = 0
+                        else:
+                            # _connect returned without setting connected (e.g. 429)
+                            consecutive_reconnect_failures += 1
+                            logger.info(
+                                f"[SONIOX] Proactive reconnect did not establish connection "
+                                f"(failure {consecutive_reconnect_failures}/{MAX_CONSECUTIVE_FAILURES})"
+                            )
+                    except Exception as e:
+                        consecutive_reconnect_failures += 1
+                        logger.warning(
+                            f"[SONIOX_TIMING] Keepalive: proactive reconnect failed "
+                            f"({consecutive_reconnect_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}"
+                        )
         except asyncio.CancelledError:
             idle_sec = time.monotonic() - self._pipeline_start_time
             logger.info(
-                f"[SONIOX_TIMING] Idle keepalive ended after {ping_count} pings "
-                f"({idle_sec:.1f}s) — user started speaking"
+                f"[SONIOX_TIMING] Keepalive loop ended after {ping_count} pings "
+                f"({idle_sec:.1f}s) — pipeline stopping"
             )

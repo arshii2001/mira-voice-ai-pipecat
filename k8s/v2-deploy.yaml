@@ -107,19 +107,15 @@ spec:
       # ── Init container: seed PVC with defaults if empty ──────
       initContainers:
         - name: seed-data
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.7
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.24
           command: ["/bin/sh", "-c"]
           args:
             - |
               echo "[init] Seeding PVC data..."
-              # Prompts: copy only if dir is empty / missing
-              if [ ! -f /pipecat-data/prompts/v3.md ]; then
-                echo "[init] Copying default prompts..."
-                mkdir -p /pipecat-data/prompts
-                cp -v /app/prompts/*.md /pipecat-data/prompts/
-              else
-                echo "[init] Prompts already exist, skipping."
-              fi
+              # Prompts: always copy to ensure latest versions are used
+              echo "[init] Copying prompts (always update)..."
+              mkdir -p /pipecat-data/prompts
+              cp -fv /app/prompts/*.md /pipecat-data/prompts/
               # Curriculum: copy only if dir is empty / missing
               if [ ! -f /pipecat-data/curriculum/ncert_science_10.json ]; then
                 echo "[init] Copying default curriculum..."
@@ -136,7 +132,7 @@ spec:
               mountPath: /pipecat-data
       containers:
         - name: pipecat-v2
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.7
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.24
           imagePullPolicy: Always
           ports:
             - containerPort: 7860
@@ -204,6 +200,12 @@ spec:
                 secretKeyRef:
                   name: mira-shared-secrets
                   key: WEBUI_SECRET_KEY
+            # ── STT API key (Soniox) ──
+            - name: SONIOX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pipecat-v2-secrets
+                  key: SONIOX_API_KEY
             # ── Paths pointing into the PVC ──
             - name: PROMPT_DIR
               value: /pipecat-data/prompts

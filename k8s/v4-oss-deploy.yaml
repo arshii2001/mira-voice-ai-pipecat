@@ -20,8 +20,8 @@ data:
   TTS_SAMPLE_RATE: "24000"
   DEFAULT_VOICE: "en_female"
   LLM_PROVIDER: "openai"
-  LLM_BASE_URL: "http://vllm-gpt-oss-120b-b200.bbf23a-prod-cw-3.coreweave.app/v1"
-  LLM_MODEL: "openai/gpt-oss-120b"
+  LLM_BASE_URL: "https://api.openai.com/v1"
+  LLM_MODEL: "gpt-4o-mini"
   HOST: "0.0.0.0"
   PORT: "7860"
   LOG_LEVEL: "INFO"
@@ -106,7 +106,7 @@ spec:
       # ── Init container: seed PVC with defaults if empty ──────
       initContainers:
         - name: seed-data
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.14
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.24
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -131,7 +131,7 @@ spec:
               mountPath: /pipecat-data
       containers:
         - name: pipecat-v4-oss
-          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.14
+          image: iaienterpriseacr.azurecr.io/audio:mira-voice-v3.24
           imagePullPolicy: Always
           ports:
             - containerPort: 7860

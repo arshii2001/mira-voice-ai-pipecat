@@ -262,19 +262,19 @@ def test_soniox_reconnect_audio_buffer():
     # 1. Check idle keepalive exists
     assert "_idle_keepalive_loop" in code, \
         "Missing _idle_keepalive_loop — Soniox will drop idle connections in tutor mode"
-    print("  ✅ _idle_keepalive_loop exists (prevents idle drops before first speech)")
+    print("  ✅ _idle_keepalive_loop exists (prevents idle drops between ALL turns)")
 
     # Check it's started in start()
     assert "self._idle_keepalive_task = asyncio.create_task(self._idle_keepalive_loop())" in code, \
         "_idle_keepalive_loop should be started in start()"
     print("  ✅ Idle keepalive started on pipeline start()")
 
-    # Check it's cancelled on first speech
-    assert "_first_speech_received" in code, \
-        "Missing _first_speech_received flag"
-    assert "idle_keepalive_cancelled" in code or "Cancelled idle keepalive" in code, \
-        "Idle keepalive should be cancelled on first UserStartedSpeakingFrame"
-    print("  ✅ Idle keepalive cancelled on first speech")
+    # Check keepalive runs continuously (not just before first speech)
+    assert "_pipeline_stopped" in code, \
+        "Keepalive loop should run until _pipeline_stopped"
+    assert "user_speaking" in code and "bot_speaking" in code, \
+        "Keepalive should skip pings when user or bot is speaking"
+    print("  ✅ Keepalive runs continuously during all idle gaps (not just before first speech)")
 
     # 2. Check audio buffering during reconnection
     assert "_reconnect_buffer" in code, \
@@ -314,15 +314,16 @@ def test_soniox_reconnect_audio_buffer():
     print("  ✅ Bot-speech keepalive still present")
 
     print()
-    print("  Timeline (FIXED):")
+    print("  Timeline (FIXED — keepalive runs between ALL turns):")
     print("    t=0s:    Pipeline starts, Soniox connects eagerly ✅")
-    print("    t=0s:    _idle_keepalive_loop starts (pings every 5s) ✅")
-    print("    t=5s:    Idle keepalive ping → Soniox stays alive ✅")
-    print("    t=10s:   Idle keepalive ping → Soniox stays alive ✅")
-    print("    t=15s:   User presses mic, starts speaking")
-    print("    t=15.2s: VAD fires → idle keepalive cancelled")
-    print("    t=15.2s: Soniox already connected → audio flows immediately ✅")
-    print("    t=15.2s: No reconnection needed → no word loss ✅")
+    print("    t=0s:    Keepalive loop starts (pings every 5s during idle) ✅")
+    print("    t=5s:    Keepalive ping → Soniox stays alive ✅")
+    print("    t=10s:   Keepalive ping → Soniox stays alive ✅")
+    print("    t=15s:   User speaks → keepalive auto-pauses (real audio flows) ✅")
+    print("    t=20s:   Bot responds → bot keepalive runs ✅")
+    print("    t=28s:   Bot stops → idle keepalive resumes pinging ✅")
+    print("    t=33s:   Keepalive ping → Soniox stays alive ✅")
+    print("    t=38s:   User speaks again → already connected, no reconnect ✅")
 
     print("\n  ✅ Soniox idle keepalive & reconnect buffer verified!")
     return False  # drops_audio = False (fixed)

@@ -179,48 +179,7 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
     else:
         report.warn(SECTION, "Middle of audio distortion", f"diff={mid_diff:.0f}")
 
-    # 1c. Fade-in only (new streaming method)
-    faded_in = SvaraTTSService._apply_fade_in(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    arr_in = pcm_to_array(faded_in)
-    if abs(arr_in[0]) < 100:
-        report.ok(SECTION, "Fade-in only → zero start", f"start={arr_in[0]:.0f}")
-    else:
-        report.fail(SECTION, "Fade-in only → zero start", f"start={arr_in[0]:.0f}")
-    # End should be unchanged
-    end_diff = abs(pcm_to_array(pcm)[-1] - arr_in[-1])
-    if end_diff < 10:
-        report.ok(SECTION, "Fade-in only → end unchanged", f"diff={end_diff:.0f}")
-    else:
-        report.fail(SECTION, "Fade-in only → end unchanged", f"diff={end_diff:.0f}")
-
-    # 1d. Fade-out only
-    faded_out = SvaraTTSService._apply_fade_out(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    arr_out = pcm_to_array(faded_out)
-    if abs(arr_out[-1]) < 100:
-        report.ok(SECTION, "Fade-out only → zero end", f"end={arr_out[-1]:.0f}")
-    else:
-        report.fail(SECTION, "Fade-out only → zero end", f"end={arr_out[-1]:.0f}")
-    # Start should be unchanged
-    start_diff = abs(pcm_to_array(pcm)[0] - arr_out[0])
-    if start_diff < 10:
-        report.ok(SECTION, "Fade-out only → start unchanged", f"diff={start_diff:.0f}")
-    else:
-        report.fail(SECTION, "Fade-out only → start unchanged", f"diff={start_diff:.0f}")
-
-    # 1e. Streaming fade-in + fade-out = same as full fade_edges
-    # Simulate what the streaming TTS path does:
-    # Apply fade_in to first chunk, then fade_out to last chunk
-    streamed = SvaraTTSService._apply_fade_in(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    streamed = SvaraTTSService._apply_fade_out(streamed, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    arr_streamed = pcm_to_array(streamed)
-    arr_full = pcm_to_array(faded)
-    max_diff = np.max(np.abs(arr_streamed - arr_full))
-    if max_diff < 10:
-        report.ok(SECTION, "Streaming fade = full fade_edges", f"max_diff={max_diff:.0f}")
-    else:
-        report.warn(SECTION, "Streaming fade ≠ full fade_edges", f"max_diff={max_diff:.0f}")
-
-    # 1f. Pop elimination at sentence boundary
+    # 1c. Pop elimination at sentence boundary
     sent_a = generate_sine_pcm(freq_hz=440, duration_sec=0.8, sr=sr, amplitude=12000)
     sent_b = generate_sine_pcm(freq_hz=660, duration_sec=0.6, sr=sr, amplitude=14000)
 
@@ -229,11 +188,9 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
     join = len(sent_a) // 2
     raw_jump = abs(float(raw_arr[join]) - float(raw_arr[join - 1]))
 
-    # Faded concatenation (what streaming TTS does)
-    fa = SvaraTTSService._apply_fade_in(sent_a, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    fa = SvaraTTSService._apply_fade_out(fa, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    fb = SvaraTTSService._apply_fade_in(sent_b, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    fb = SvaraTTSService._apply_fade_out(fb, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    # Faded concatenation (each sentence gets fade_edges applied)
+    fa = SvaraTTSService._apply_fade_edges(sent_a, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    fb = SvaraTTSService._apply_fade_edges(sent_b, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
     faded_arr = pcm_to_array(fa + fb)
     faded_jump = abs(float(faded_arr[join]) - float(faded_arr[join - 1]))
 
@@ -260,12 +217,9 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
         os.makedirs(output_dir, exist_ok=True)
         save_wav(f"{output_dir}/01_original.wav", pcm, sr)
         save_wav(f"{output_dir}/02_fade_edges.wav", faded, sr)
-        save_wav(f"{output_dir}/03_fade_in_only.wav", faded_in, sr)
-        save_wav(f"{output_dir}/04_fade_out_only.wav", faded_out, sr)
-        save_wav(f"{output_dir}/05_streamed_fade.wav", streamed, sr)
-        save_wav(f"{output_dir}/06_raw_concat_POPS.wav", sent_a + sent_b, sr)
-        save_wav(f"{output_dir}/07_faded_concat_SMOOTH.wav", fa + fb, sr)
-        save_wav(f"{output_dir}/08_crossfaded.wav", merged, sr)
+        save_wav(f"{output_dir}/03_raw_concat_POPS.wav", sent_a + sent_b, sr)
+        save_wav(f"{output_dir}/04_faded_concat_SMOOTH.wav", fa + fb, sr)
+        save_wav(f"{output_dir}/05_crossfaded.wav", merged, sr)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -281,49 +235,46 @@ def test_tts_streaming_logic():
     print(f"2. {SECTION}")
     print(f"{'=' * 60}")
 
-    # Read the run_tts source code to verify streaming behavior
+    # Read the run_tts source code to verify architecture
     source = inspect.getsource(SvaraTTSService.run_tts)
 
-    # 2a. Single-chunk path should stream (not collect all first)
-    if "pending_tail" in source and "_apply_fade_in" in source:
-        report.ok(SECTION, "Single-chunk path uses streaming with fade-in/out",
-                  "pending_tail buffer for fade-out")
+    # 2a. Collect-then-emit architecture (simple, reliable)
+    if "_synthesize_one" in source and "_apply_fade_edges" in source:
+        report.ok(SECTION, "Collect-then-emit architecture",
+                  "collect audio → trim → crossfade → fade edges → emit")
     else:
-        report.fail(SECTION, "Single-chunk path should stream, not buffer all",
-                    "Missing pending_tail or _apply_fade_in")
+        report.fail(SECTION, "Missing collect-then-emit architecture",
+                    "Expected _synthesize_one and _apply_fade_edges")
 
-    # 2b. Multi-chunk path collects and crossfades (expected)
-    if "_crossfade_pcm" in source and "multi_chunk" in source:
-        report.ok(SECTION, "Multi-chunk path uses crossfade",
+    # 2b. Crossfade for multi-chunk text
+    if "_crossfade_pcm" in source:
+        report.ok(SECTION, "Multi-chunk crossfade present",
                   "Correct: collect + crossfade for long text")
     else:
         report.warn(SECTION, "Multi-chunk crossfade missing")
 
-    # 2c. Check that [SMOOTH] timing logs are present
-    if "[SMOOTH]" in source:
-        report.ok(SECTION, "[SMOOTH] timing logs in run_tts",
-                  "First-byte and completion logged")
+    # 2c. Silence trimming per chunk
+    if "_trim_silence" in source:
+        report.ok(SECTION, "Silence trimming per chunk (notebook algorithm)",
+                  "Eliminates gaps between chunks")
     else:
-        report.warn(SECTION, "Missing [SMOOTH] timing logs in run_tts")
+        report.warn(SECTION, "Missing silence trimming")
 
-    # 2d. Check streaming TTS WebSocket has timing logs
+    # 2d. Check TTS WebSocket has timing logs
     ws_source = inspect.getsource(SvaraTTSService._run_streaming_tts_websocket)
-    smooth_logs = ws_source.count("[SMOOTH]")
-    if smooth_logs >= 3:
-        report.ok(SECTION, f"Svara WS has {smooth_logs} [SMOOTH] timing points",
+    timing_logs = ws_source.count("logger.info")
+    if timing_logs >= 3:
+        report.ok(SECTION, f"Svara WS has {timing_logs} timing log points",
                   "connect, ready, first-byte, done")
     else:
-        report.warn(SECTION, f"Only {smooth_logs} [SMOOTH] logs in Svara WS")
+        report.warn(SECTION, f"Only {timing_logs} timing logs in Svara WS")
 
-    # 2e. Fade buffer size check
-    sr = 24000
-    fade_bytes = int(_CROSSFADE_SEC * sr) * 2  # PCM16 = 2 bytes/sample
-    if fade_bytes < 4096:
-        report.ok(SECTION, f"Fade buffer ({fade_bytes}B) < transport chunk (4096B)",
-                  "Won't delay first audio byte significantly")
+    # 2e. No warm WS pool complexity (removed for simplicity)
+    if "_warm_ws" not in source and "_start_warming" not in source:
+        report.ok(SECTION, "No warm WS pool (removed — was causing race conditions)",
+                  "Simple connect-per-sentence is more reliable")
     else:
-        report.warn(SECTION, f"Fade buffer ({fade_bytes}B) ≥ transport chunk (4096B)",
-                    "May delay first audio byte")
+        report.warn(SECTION, "Warm WS pool still present — may cause race conditions")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -586,10 +537,10 @@ def test_soniox_keepalive():
     else:
         report.warn(SECTION, "Keepalive may not start eagerly")
 
-    # 6c. Keepalive cancelled on first speech
-    if "_first_speech_received" in code:
-        report.ok(SECTION, "Keepalive cancelled on first user speech",
-                  "Saves resources after user starts talking")
+    # 6c. Keepalive runs continuously (auto-pauses during speech)
+    if "_pipeline_stopped" in code and "user_speaking" in code:
+        report.ok(SECTION, "Keepalive runs between ALL turns",
+                  "Auto-pauses during speech, resumes during idle gaps")
     else:
         report.warn(SECTION, "Missing _first_speech_received flag")
 
