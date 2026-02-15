@@ -83,6 +83,106 @@ def _normalize_classroom_language(lang: str) -> Optional[str]:
     return code if code in _SUPPORTED_CLASSROOM_LANGUAGES else None
 
 
+# ── Number-to-words for TTS in non-English languages ──────────────
+# Hindi TTS (Svara) mangles ASCII digits like "24 + 17" because it
+# expects Devanagari or spelled-out numbers.  We convert integers to
+# their spoken word forms before sending to TTS.
+
+_HINDI_ONES = [
+    "", "एक", "दो", "तीन", "चार", "पाँच", "छह", "सात", "आठ", "नौ",
+    "दस", "ग्यारह", "बारह", "तेरह", "चौदह", "पंद्रह", "सोलह", "सत्रह",
+    "अठारह", "उन्नीस", "बीस", "इक्कीस", "बाईस", "तेईस", "चौबीस",
+    "पच्चीस", "छब्बीस", "सत्ताईस", "अट्ठाईस", "उनतीस", "तीस",
+    "इकतीस", "बत्तीस", "तैंतीस", "चौंतीस", "पैंतीस", "छत्तीस",
+    "सैंतीस", "अड़तीस", "उनतालीस", "चालीस", "इकतालीस", "बयालीस",
+    "तैंतालीस", "चवालीस", "पैंतालीस", "छियालीस", "सैंतालीस",
+    "अड़तालीस", "उनचास", "पचास", "इक्यावन", "बावन", "तिरपन",
+    "चौवन", "पचपन", "छप्पन", "सत्तावन", "अट्ठावन", "उनसठ", "साठ",
+    "इकसठ", "बासठ", "तिरसठ", "चौंसठ", "पैंसठ", "छियासठ", "सड़सठ",
+    "अड़सठ", "उनहत्तर", "सत्तर", "इकहत्तर", "बहत्तर", "तिहत्तर",
+    "चौहत्तर", "पचहत्तर", "छिहत्तर", "सतहत्तर", "अठहत्तर",
+    "उन्यासी", "अस्सी", "इक्यासी", "बयासी", "तिरासी", "चौरासी",
+    "पचासी", "छियासी", "सतासी", "अट्ठासी", "नवासी", "नब्बे",
+    "इक्यानवे", "बानवे", "तिरानवे", "चौरानवे", "पंचानवे", "छियानवे",
+    "सत्तानवे", "अट्ठानवे", "निन्यानवे",
+]
+
+_TAMIL_ONES = {
+    0: "பூஜ்ஜியம்", 1: "ஒன்று", 2: "இரண்டு", 3: "மூன்று", 4: "நான்கு",
+    5: "ஐந்து", 6: "ஆறு", 7: "ஏழு", 8: "எட்டு", 9: "ஒன்பது", 10: "பத்து",
+}
+
+
+def _hindi_number_word(n: int) -> str:
+    """Convert integer 0-9999 to Hindi words (best-effort)."""
+    if n < 0:
+        return "ऋण " + _hindi_number_word(-n)
+    if n < 100:
+        return _HINDI_ONES[n] if n < len(_HINDI_ONES) else str(n)
+    if n < 1000:
+        hundreds = n // 100
+        remainder = n % 100
+        h = _HINDI_ONES[hundreds] + " सौ"
+        if remainder:
+            h += " " + _hindi_number_word(remainder)
+        return h
+    if n < 10000:
+        thousands = n // 1000
+        remainder = n % 1000
+        t = _HINDI_ONES[thousands] + " हज़ार"
+        if remainder:
+            t += " " + _hindi_number_word(remainder)
+        return t
+    return str(n)  # fallback for very large numbers
+
+
+def _tamil_number_word(n: int) -> str:
+    """Convert integer 0-10 to Tamil words (best-effort, fallback to digits)."""
+    if n in _TAMIL_ONES:
+        return _TAMIL_ONES[n]
+    return str(n)
+
+
+# Match standalone integers (1-4 digits) that aren't part of a word
+_TTS_NUMBER_RE = re.compile(r'(?<!\w)(\d{1,4})(?!\w)')
+
+# Match math operators surrounded by spaces
+_TTS_MATH_OPS = {"+": {"hi": "जमा", "ta": "கூட்டல்"},
+                 "-": {"hi": "घटा", "ta": "கழித்தல்"},
+                 "×": {"hi": "गुणा", "ta": "பெருக்கல்"},
+                 "x": {"hi": "गुणा", "ta": "பெருக்கல்"},
+                 "÷": {"hi": "भाग", "ta": "வகுத்தல்"},
+                 "/": {"hi": "भाग", "ta": "வகுத்தல்"},
+                 "=": {"hi": "बराबर", "ta": "சமம்"}}
+
+
+def _normalize_tts_numbers(text: str, lang: str) -> str:
+    """Replace ASCII digits and math operators with spoken words for TTS.
+
+    Only applies to Hindi and Tamil — English TTS handles digits natively.
+    """
+    if lang not in ("hi", "ta"):
+        return text
+
+    # Replace numbers
+    def _replace_num(m):
+        n = int(m.group(1))
+        if lang == "hi":
+            return _hindi_number_word(n)
+        elif lang == "ta":
+            return _tamil_number_word(n)
+        return m.group(0)
+
+    result = _TTS_NUMBER_RE.sub(_replace_num, text)
+
+    # Replace math operators
+    for op, words in _TTS_MATH_OPS.items():
+        if op in result and lang in words:
+            result = result.replace(f" {op} ", f" {words[lang]} ")
+
+    return result
+
+
 def _response_language_instruction(lang_code: str) -> str:
     """Hard instruction for assistant response language by speaker profile."""
     code = _normalize_classroom_language(lang_code or "en") or "en"
@@ -445,6 +545,7 @@ class Room:
     _grace_speaker_id: Optional[str] = None  # Speaker ID held during grace period
     _intro_announced: bool = False  # One-time room intro prompt has been sent
     _discussion_auto_release_task: Optional[asyncio.Task] = None  # Inactivity timer for discussion speaker
+    _interrupted: bool = False  # Set True on barge-in; checked by listener delivery tasks
 
 
     def to_dict(self) -> dict:
@@ -639,6 +740,14 @@ class RoomManager:
         if not sentence.strip():
             return []
 
+        # ── Barge-in guard: abort if the speaker was interrupted ──
+        if room._interrupted:
+            logger.info(
+                f"[CLASSROOM] Skipping listener delivery (room interrupted): "
+                f"'{sentence[:50]}'"
+            )
+            return []
+
         # Per-sentence language detection: the LLM may drift mid-response,
         # so re-detect the actual language of THIS sentence rather than
         # trusting the source_lang set at the start of the response.
@@ -655,7 +764,7 @@ class RoomManager:
         listeners = [u for u in list(room.users.values()) if u.user_id != room.speaker_id]
         for user in listeners:
             tasks.append(
-                self._deliver_sentence_to_listener(user, sentence, source_lang, is_final)
+                self._deliver_sentence_to_listener(room, user, sentence, source_lang, is_final)
             )
         if tasks:
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -664,6 +773,7 @@ class RoomManager:
 
     async def _deliver_sentence_to_listener(
         self,
+        room: Room,
         user: RoomUser,
         sentence: str,
         source_lang: str,
@@ -671,15 +781,23 @@ class RoomManager:
     ) -> dict:
         """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode).
 
-        Text (bot_text) is sent immediately — never blocked by TTS.
-        Audio is serialized via per-user _audio_lock so binary frames from
-        different sentences never interleave on the same WebSocket.
+        For text_only listeners: text is sent immediately (no lock needed).
+        For text_and_audio listeners: text + audio are sent together inside
+        the per-user _audio_lock so that the text the listener sees is
+        always in sync with the audio they hear.  Without this, text from
+        later sentences would race ahead of earlier audio, creating the
+        "psychedelic" desync effect.
 
         Returns a timing dict: {user, language, mode, translate_ms, tts_ms, audio_bytes, total_ms}
         """
         t_start = time.time()
         try:
-            # ── Translation (no lock needed) ──
+            # ── Barge-in guard: abort if room was interrupted ──
+            if room._interrupted:
+                return {"user": user.name, "language": user.language, "mode": user.mode,
+                        "skipped": "interrupted", "total_ms": 0.0}
+
+            # ── Translation (no lock needed — can run concurrently) ──
             t_translate_start = time.time()
             if user.language != source_lang and self._translator:
                 translated = await self._translator.translate(
@@ -700,42 +818,74 @@ class RoomManager:
                 )
                 _metrics_collector.record_translation(translate_ms)
 
-            # Send streamed text chunk IMMEDIATELY — not gated by audio lock.
-            # This ensures listeners see text even while greeting/previous TTS
-            # is still playing.
-            await self._send_json(user.websocket, {
+            bot_text_msg = {
                 "type": "bot_text",
                 "text": translated,
                 "streaming": True,
                 "translated": user.language != source_lang,
                 "target_language": user.language,
-            })
+            }
 
-            # TTS for audio-mode listeners — acquire lock only for audio portion
             tts_ms = 0.0
             tts_first_byte_ms = 0.0
             audio_bytes = 0
             audio_chunks = 0
+
+            # ── Second barge-in check after translation (before expensive TTS) ──
+            if room._interrupted:
+                return {"user": user.name, "language": user.language, "mode": user.mode,
+                        "skipped": "interrupted_after_translate", "total_ms": round((time.time() - t_start) * 1000, 1)}
+
             if self._tts and user.mode == "text_and_audio":
+                # ── text_and_audio: send text + audio TOGETHER inside lock ──
+                # Text is sent AFTER the first TTS audio chunk arrives, so the
+                # listener sees text at the same moment audio starts playing.
+                # Without this, text appears 1-4s before audio (the TTS
+                # synthesis latency).
+                # Normalize numbers for TTS (Hindi/Tamil can't handle ASCII digits)
+                tts_input = _normalize_tts_numbers(translated, user.language)
+                text_sent = False
                 async with user._audio_lock:
                     t_tts_start = time.time()
                     await self._send_json(user.websocket, {"type": "bot_audio_start"})
                     try:
-                        async for frame in self._tts.run_tts(translated):
+                        async for frame in self._tts.run_tts(tts_input):
+                            # ── Barge-in check inside TTS loop ──
+                            if room._interrupted:
+                                logger.info(
+                                    f"[CLASSROOM] Aborting TTS mid-stream for {user.name} "
+                                    f"(room interrupted after {audio_chunks} chunks)"
+                                )
+                                break
                             if hasattr(frame, "audio") and frame.audio:
                                 if audio_chunks == 0:
                                     tts_first_byte_ms = round((time.time() - t_tts_start) * 1000, 1)
+                                    # Send text WITH the first audio chunk so
+                                    # text and audio arrive simultaneously.
+                                    await self._send_json(user.websocket, bot_text_msg)
+                                    text_sent = True
                                 await self._send_bytes(user.websocket, frame.audio)
                                 audio_bytes += len(frame.audio)
                                 audio_chunks += 1
+                    except asyncio.CancelledError:
+                        logger.info(f"[CLASSROOM] TTS delivery cancelled for {user.name}")
+                        raise
                     except Exception as tts_err:
                         logger.warning(f"[CLASSROOM] Sentence TTS error for {user.name}: {tts_err}")
                         _metrics_collector.record_error("listener_tts")
+                    # Fallback: if TTS produced no audio (error/empty), still send
+                    # the text so the listener can at least read it.
+                    if not text_sent:
+                        await self._send_json(user.websocket, bot_text_msg)
+                        text_sent = True
                     await self._send_json(user.websocket, {"type": "bot_audio_end"})
                     tts_ms = round((time.time() - t_tts_start) * 1000, 1)
                     _metrics_collector.record_tts(tts_ms, audio_bytes)
-            elif not self._tts and user.mode == "text_and_audio":
-                logger.warning(f"[CLASSROOM] No TTS available for audio-mode listener {user.name}")
+            elif user.mode == "text_only" or not self._tts:
+                # ── text_only: send text immediately, no audio ──
+                await self._send_json(user.websocket, bot_text_msg)
+                if not self._tts and user.mode == "text_and_audio":
+                    logger.warning(f"[CLASSROOM] No TTS available for audio-mode listener {user.name}")
 
             total_ms = round((time.time() - t_start) * 1000, 1)
             logger.info(
@@ -2315,11 +2465,13 @@ class RoomManager:
 
             # ── Step 4-7: Synthesize + stream audio (only if user wants audio) ──
             if self._tts and user.mode == "text_and_audio":
+                # Normalize numbers for TTS (Hindi/Tamil can't handle ASCII digits)
+                tts_input = _normalize_tts_numbers(tts_text, user.language)
                 await self._send_json(user.websocket, {"type": "bot_audio_start"})
                 tts_t0 = time.time()
 
                 try:
-                    async for frame in self._tts.run_tts(tts_text):
+                    async for frame in self._tts.run_tts(tts_input):
                         # AudioChunk has .audio (raw PCM bytes)
                         if hasattr(frame, "audio") and frame.audio:
                             await self._send_bytes(user.websocket, frame.audio)
@@ -2426,7 +2578,59 @@ class ClassroomBroadcaster(FrameProcessor):
         self._llm_end_at: float = 0.0
         self._turn_count: int = 0
 
+    def _handle_barge_in(self, frame):
+        """Handle barge-in: clear buffers, cancel listener tasks, set room interrupted flag.
+
+        Called BEFORE super().process_frame() so it runs regardless of how the
+        base class handles system frames.
+        """
+        interrupted_len = len(self._llm_buffer)
+        interrupted_clauses = self._clause_count
+        cancelled = 0
+        for task in self._pending_listener_tasks:
+            if not task.done():
+                task.cancel()
+                cancelled += 1
+
+        # Set room-level interrupted flag so any in-flight listener delivery
+        # tasks (translate + TTS) can check and abort early.
+        self._room._interrupted = True
+
+        # Save partial response to conversation history so context isn't lost
+        if self._llm_buffer.strip():
+            partial = self._llm_buffer.strip()
+            if self._last_user_text:
+                self._room.conversation_history.append(
+                    {"role": "user", "content": self._last_user_text}
+                )
+            self._room.conversation_history.append(
+                {"role": "assistant", "content": f"{partial} [interrupted]"}
+            )
+            if len(self._room.conversation_history) > 40:
+                self._room.conversation_history = self._room.conversation_history[-30:]
+
+        self._llm_buffer = ""
+        self._clause_buffer = ""
+        self._pending_listener_tasks = []
+        self._clause_count = 0
+        self._awaiting_bot_audio_end = False
+
+        logger.warning(
+            f"[CLASSROOM] ⚡ BARGE-IN in voice mode | turn={self._turn_count} | "
+            f"interrupted_chars={interrupted_len} | clauses_sent={interrupted_clauses} | "
+            f"listener_tasks_cancelled={cancelled}"
+        )
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # ── Handle barge-in BEFORE super() ──
+        # StartInterruptionFrame is a system frame that super().process_frame()
+        # handles internally (propagating it through the pipeline). If we only
+        # check it in the elif chain below, the base class may consume it
+        # before our handler runs.  Process it here first, then let super()
+        # propagate it.
+        if isinstance(frame, StartInterruptionFrame):
+            self._handle_barge_in(frame)
+
         await super().process_frame(frame, direction)
 
         # Tap STT final transcription — broadcast speaker's question
@@ -2436,6 +2640,8 @@ class ClassroomBroadcaster(FrameProcessor):
             self._last_user_lang = getattr(frame, "language", "en") or "en"
             self._turn_count += 1
             self._awaiting_bot_audio_end = False
+            # Clear interrupted flag — new turn starts fresh
+            self._room._interrupted = False
 
             # ── Dynamic language update ──
             # If the STT detects a different language than the speaker's
@@ -2587,55 +2793,48 @@ class ClassroomBroadcaster(FrameProcessor):
                 if len(self._room.conversation_history) > 40:
                     self._room.conversation_history = self._room.conversation_history[-30:]
 
-                # Also broadcast the full response for text-mode listeners
-                # who may have joined late or need the complete message
+                # ── Persist bot response to DB (was previously inside
+                # broadcast_bot_response which also re-sent the full
+                # response to listeners, causing duplicates). ──
+                source_lang = self._room_mgr._detect_text_language(response_text) if len(response_text) >= 30 else self._last_user_lang
                 asyncio.create_task(
-                    self._room_mgr.broadcast_bot_response(
-                        room=self._room,
-                        text=response_text,
-                        language=self._last_user_lang,
+                    self._room_mgr.save_message_to_db(
+                        room=self._room, role="assistant",
+                        content=response_text,
+                        speaker_name="Mira",
+                        original_language=source_lang,
                     )
                 )
+
+                # ── Wait for all clause-level listener deliveries to finish,
+                # then send bot_text_complete so listeners know streaming is
+                # done.  This replaces the old broadcast_bot_response which
+                # re-translated + re-TTS'd the ENTIRE response, causing
+                # listeners to hear everything twice. ──
+                _captured_tasks = list(self._pending_listener_tasks)
+                _captured_room = self._room
+                _captured_speaker = self._room.speaker_id
+
+                async def _finish_voice_listener_fanout():
+                    try:
+                        if _captured_tasks:
+                            await asyncio.gather(*_captured_tasks, return_exceptions=True)
+                        # Signal listeners that streaming is done
+                        await self._room_mgr._broadcast_json(_captured_room, {
+                            "type": "bot_text_complete",
+                            "text": "",
+                        }, exclude=_captured_speaker)
+                    except Exception as e:
+                        logger.warning(f"[CLASSROOM] Voice listener fanout error: {e}")
+
+                asyncio.create_task(_finish_voice_listener_fanout())
+                self._pending_listener_tasks = []
+
                 if self._room.room_type == "discussion" and self._room.speaker_id:
                     self._awaiting_bot_audio_end = True
 
-        # ── Barge-in: user interrupted the bot mid-response ──
-        # Clear all accumulated buffers so the next response starts fresh.
-        # Cancel pending listener delivery tasks to avoid sending stale
-        # partial translations from the interrupted response.
-        elif isinstance(frame, StartInterruptionFrame):
-            interrupted_len = len(self._llm_buffer)
-            interrupted_clauses = self._clause_count
-            cancelled = 0
-            for task in self._pending_listener_tasks:
-                if not task.done():
-                    task.cancel()
-                    cancelled += 1
-
-            # Save partial response to conversation history so context isn't lost
-            if self._llm_buffer.strip():
-                partial = self._llm_buffer.strip()
-                if self._last_user_text:
-                    self._room.conversation_history.append(
-                        {"role": "user", "content": self._last_user_text}
-                    )
-                self._room.conversation_history.append(
-                    {"role": "assistant", "content": f"{partial} [interrupted]"}
-                )
-                if len(self._room.conversation_history) > 40:
-                    self._room.conversation_history = self._room.conversation_history[-30:]
-
-            self._llm_buffer = ""
-            self._clause_buffer = ""
-            self._pending_listener_tasks = []
-            self._clause_count = 0
-            self._awaiting_bot_audio_end = False
-
-            logger.warning(
-                f"[CLASSROOM] ⚡ BARGE-IN in voice mode | turn={self._turn_count} | "
-                f"interrupted_chars={interrupted_len} | clauses_sent={interrupted_clauses} | "
-                f"listener_tasks_cancelled={cancelled}"
-            )
+        # ── Barge-in handled in _handle_barge_in() BEFORE super() ──
+        # (StartInterruptionFrame is a system frame; see process_frame top)
 
         # Voice mode: arm discussion inactivity timer only after bot audio is fully done.
         elif isinstance(frame, BotStoppedSpeakingFrame):

@@ -132,21 +132,34 @@ async def drain_messages(ws, duration: float = 2.0) -> List[dict]:
 
     Uses a short per-recv timeout so binary audio frames are drained quickly
     without burning the entire duration on a few hundred binary frames.
+
+    Early-exit: if we've received at least one message AND then see silence
+    for 3s, we stop.  For short drains (≤5s) the old 2s-after-start rule
+    still applies so quick cleanup calls aren't slow.
     """
     messages = []
     deadline = time.time() + duration
+    start = time.time()
+    last_msg_at = 0.0  # time of last received message
     while time.time() < deadline:
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
             if isinstance(raw, str):
                 try:
                     messages.append(json.loads(raw))
+                    last_msg_at = time.time()
                 except json.JSONDecodeError:
                     pass
-            # Binary frames are silently skipped (fast path)
+            else:
+                # Binary frame — still counts as activity
+                last_msg_at = time.time()
         except asyncio.TimeoutError:
-            # No messages for 0.5s — if we've been draining for a while, stop early
-            if time.time() - (deadline - duration) > 2.0:
+            elapsed = time.time() - start
+            # Short drains: exit after 2s of total time with silence
+            if duration <= 5.0 and elapsed > 2.0:
+                break
+            # Long drains: exit only if we received messages and then had 3s of silence
+            if last_msg_at > 0 and (time.time() - last_msg_at) > 3.0:
                 break
         except Exception:
             break
@@ -502,11 +515,35 @@ async def test_sentence_delivery_ordering() -> TestResult:
         await drain_messages(ws_listener_ta, duration=1.0)
         logger.info("  2 listeners joined ✓")
 
-        # Wait for greeting translations to settle
-        await asyncio.sleep(5.0)
+        # Wait for greeting audio to fully complete for both listeners.
+        # Greeting TTS can take 10-15s for Hindi/Tamil translation.
+        # We must drain until bot_audio_end so greeting audio doesn't leak
+        # into the response collection.
+        logger.info("  Waiting for greeting audio to complete...")
+        for lbl, ws_l in [("HI", ws_listener_hi), ("TA", ws_listener_ta)]:
+            end_seen = False
+            deadline_g = time.time() + 25.0
+            while time.time() < deadline_g:
+                try:
+                    raw = await asyncio.wait_for(ws_l.recv(), timeout=1.0)
+                    if isinstance(raw, str):
+                        try:
+                            msg = json.loads(raw)
+                            if msg.get("type") == "bot_audio_end":
+                                end_seen = True
+                        except json.JSONDecodeError:
+                            pass
+                except asyncio.TimeoutError:
+                    if end_seen:
+                        break
+                    continue
+                except Exception:
+                    break
+            logger.info(f"  {lbl} greeting drained (end_seen={end_seen})")
         await drain_messages(ws_speaker, duration=2.0)
-        await drain_messages(ws_listener_hi, duration=2.0)
-        await drain_messages(ws_listener_ta, duration=2.0)
+        # Extra drain to clear any trailing messages
+        await drain_messages(ws_listener_hi, duration=1.0)
+        await drain_messages(ws_listener_ta, duration=1.0)
 
         # Ask a question that will produce multiple sentences
         await ws_speaker.send(json.dumps({
@@ -520,10 +557,12 @@ async def test_sentence_delivery_ordering() -> TestResult:
         assert len(sp_response.strip()) > 0, "No bot response"
         logger.info(f"  Speaker got response ({len(sp_response)} chars) ✓")
 
-        # Collect listener messages — translation + TTS can take 15-20s for
-        # multi-sentence responses, especially with Hindi/Tamil translation.
-        hi_msgs = await drain_messages(ws_listener_hi, duration=20.0)
-        ta_msgs = await drain_messages(ws_listener_ta, duration=15.0)
+        # Collect listener messages — text now arrives WITH the first audio
+        # chunk (not before), so we need to drain long enough for translation
+        # + TTS (3-5s per sentence × 3 sentences, serialized by audio_lock).
+        # Use 45s to be safe.
+        hi_msgs = await drain_messages(ws_listener_hi, duration=45.0)
+        ta_msgs = await drain_messages(ws_listener_ta, duration=30.0)
 
         # Extract ordered text events
         hi_texts = []

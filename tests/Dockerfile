@@ -37,6 +37,7 @@ COPY tests/test_multiturn_timing.py /app/tests/
 COPY tests/test_tts_sentences.py /app/tests/
 COPY tests/test_stt_verify.py /app/tests/
 COPY tests/test_e2e_audio_loop.py /app/tests/
+COPY tests/test_text_audio_timing.py /app/tests/
 COPY tests/run_all_tests.py /app/tests/
 
 # Copy pyproject.toml for pytest config (asyncio_mode = "auto")
@@ -50,6 +51,7 @@ COPY auth.py /app/
 COPY curriculum_manager.py /app/
 COPY bot.py /app/
 COPY server.py /app/
+COPY provider_config.py /app/
 COPY services/ /app/services/
 COPY prompts/ /app/prompts/
 COPY content/ /app/content/
