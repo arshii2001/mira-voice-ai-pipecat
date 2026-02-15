@@ -97,7 +97,9 @@ class SvaraTTSService(TTSService):
     # Opening too many simultaneous WS connections causes "Background loop has
     # errored already" errors.  This is shared across ALL instances so that
     # multiple user sessions don't overwhelm the server.
-    _svara_semaphore: asyncio.Semaphore = asyncio.Semaphore(1)
+    # Capacity 3: allows the voice pipeline + 2 classroom listeners to run
+    # concurrently without starving classroom TTS during multi-listener tests.
+    _svara_semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
 
     def __init__(
         self,
