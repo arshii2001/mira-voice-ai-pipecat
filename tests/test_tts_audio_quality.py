@@ -27,7 +27,10 @@ import numpy as np
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.svara_tts import SvaraTTSService, _CHUNK_TARGET, _CHUNK_MAX, _CHUNK_MIN, _CROSSFADE_SEC
+from services.audio_utils import (
+    CHUNK_TARGET, CHUNK_MAX, CHUNK_MIN, CROSSFADE_SEC,
+    apply_fade_edges, crossfade_pcm, chunk_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,14 +73,14 @@ def test_chunk_text():
 
     # Short text — no splitting
     short = "Hello, how are you?"
-    chunks = SvaraTTSService._chunk_text(short)
+    chunks = chunk_text(short)
     assert len(chunks) == 1, f"Expected 1 chunk, got {len(chunks)}"
     assert chunks[0] == short
     print(f"  ✅ Short text ({len(short)} chars) → 1 chunk")
 
     # Medium text — should stay as one chunk if under target
     medium = "This is a medium length sentence that should fit in one chunk."
-    chunks = SvaraTTSService._chunk_text(medium)
+    chunks = chunk_text(medium)
     assert len(chunks) == 1, f"Expected 1 chunk for {len(medium)} chars, got {len(chunks)}"
     print(f"  ✅ Medium text ({len(medium)} chars) → 1 chunk")
 
@@ -89,20 +92,20 @@ def test_chunk_text():
         "They can make detailed recommendations to users and experts. "
         "They can act independently, replacing the need for human intelligence or intervention."
     )
-    chunks = SvaraTTSService._chunk_text(long_text)
+    chunks = chunk_text(long_text)
     assert len(chunks) > 1, f"Expected >1 chunks for {len(long_text)} chars, got {len(chunks)}"
     for i, c in enumerate(chunks):
-        assert len(c) <= _CHUNK_MAX, f"Chunk {i} exceeds max: {len(c)} > {_CHUNK_MAX}"
+        assert len(c) <= CHUNK_MAX, f"Chunk {i} exceeds max: {len(c)} > {CHUNK_MAX}"
         print(f"  Chunk {i+1}: {len(c)} chars — '{c[:60]}...'")
-    print(f"  ✅ Long text ({len(long_text)} chars) → {len(chunks)} chunks (all ≤{_CHUNK_MAX})")
+    print(f"  ✅ Long text ({len(long_text)} chars) → {len(chunks)} chunks (all ≤{CHUNK_MAX})")
 
     # Tiny tail merge
     text_with_tiny_tail = "This is a decent length sentence that goes on for a while. X."
-    chunks = SvaraTTSService._chunk_text(text_with_tiny_tail)
+    chunks = chunk_text(text_with_tiny_tail)
     for c in chunks:
-        assert len(c) >= _CHUNK_MIN or len(chunks) == 1, \
-            f"Chunk too small ({len(c)} < {_CHUNK_MIN}): '{c}'"
-    print(f"  ✅ Tiny tail merge works (no chunk < {_CHUNK_MIN} chars)")
+        assert len(c) >= CHUNK_MIN or len(chunks) == 1, \
+            f"Chunk too small ({len(c)} < {CHUNK_MIN}): '{c}'"
+    print(f"  ✅ Tiny tail merge works (no chunk < {CHUNK_MIN} chars)")
 
     # Hindi text
     hindi = (
@@ -111,9 +114,9 @@ def test_chunk_text():
         "हमारा लक्ष्य है कि हर भारतीय अपनी भाषा में गर्व से बात कर सके। "
         "चलिए इस सफर में हमारे साथ जुड़िये।"
     )
-    chunks = SvaraTTSService._chunk_text(hindi)
+    chunks = chunk_text(hindi)
     for i, c in enumerate(chunks):
-        assert len(c) <= _CHUNK_MAX, f"Hindi chunk {i} exceeds max: {len(c)}"
+        assert len(c) <= CHUNK_MAX, f"Hindi chunk {i} exceeds max: {len(c)}"
     print(f"  ✅ Hindi text ({len(hindi)} chars) → {len(chunks)} chunks")
 
     print("  ✅ All chunk_text tests passed!")
@@ -127,7 +130,7 @@ def test_fade_edges():
     pcm = generate_sine_pcm(freq_hz=440, duration_sec=0.5, sample_rate=sr)
     arr_before = pcm_to_array(pcm)
 
-    faded = SvaraTTSService._apply_fade_edges(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    faded = apply_fade_edges(pcm, fade_sec=CROSSFADE_SEC, sample_rate=sr)
     arr_after = pcm_to_array(faded)
 
     # Same length
@@ -152,7 +155,7 @@ def test_fade_edges():
     print(f"  ✅ Middle undistorted: diff={mid_diff:.0f}")
 
     # Fade-in region should be monotonically increasing in envelope
-    fade_samples = int(_CROSSFADE_SEC * sr)
+    fade_samples = int(CROSSFADE_SEC * sr)
     fade_region = np.abs(arr_after[:fade_samples])
     # Check that later samples are generally larger than earlier ones
     first_quarter = np.mean(fade_region[:fade_samples//4])
@@ -174,17 +177,17 @@ def test_crossfade():
     pcm_a = generate_sine_pcm(freq_hz=440, duration_sec=0.5, sample_rate=sr)
     pcm_b = generate_sine_pcm(freq_hz=880, duration_sec=0.5, sample_rate=sr)
 
-    merged = SvaraTTSService._crossfade_pcm(pcm_a, pcm_b, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    merged = crossfade_pcm(pcm_a, pcm_b, fade_sec=CROSSFADE_SEC, sample_rate=sr)
     arr_merged = pcm_to_array(merged)
 
     # Length should be less than sum (overlapping region)
-    expected_len = len(pcm_a)//2 + len(pcm_b)//2 - int(_CROSSFADE_SEC * sr)
+    expected_len = len(pcm_a)//2 + len(pcm_b)//2 - int(CROSSFADE_SEC * sr)
     assert abs(len(arr_merged) - expected_len) < 2, \
         f"Unexpected length: {len(arr_merged)} vs expected ~{expected_len}"
     print(f"  ✅ Merged length correct: {len(arr_merged)} samples (expected ~{expected_len})")
 
     # The crossfade region should have intermediate amplitude
-    fade_samples = int(_CROSSFADE_SEC * sr)
+    fade_samples = int(CROSSFADE_SEC * sr)
     join_point = len(pcm_a)//2 - fade_samples
     crossfade_region = arr_merged[join_point:join_point + fade_samples]
     max_amplitude = np.max(np.abs(crossfade_region))
@@ -218,8 +221,8 @@ def test_pop_elimination():
     raw_jump = abs(float(arr_raw[join]) - float(arr_raw[join - 1]))
 
     # With fade edges
-    faded_a = SvaraTTSService._apply_fade_edges(sentence_a, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    faded_b = SvaraTTSService._apply_fade_edges(sentence_b, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    faded_a = apply_fade_edges(sentence_a, fade_sec=CROSSFADE_SEC, sample_rate=sr)
+    faded_b = apply_fade_edges(sentence_b, fade_sec=CROSSFADE_SEC, sample_rate=sr)
     faded_concat = faded_a + faded_b
     arr_faded = pcm_to_array(faded_concat)
     faded_jump = abs(float(arr_faded[join]) - float(arr_faded[join - 1]))
@@ -251,36 +254,36 @@ def test_edge_cases():
     print("\n=== Test: Edge cases ===")
 
     # Empty bytes
-    result = SvaraTTSService._apply_fade_edges(b"", fade_sec=0.04, sample_rate=24000)
+    result = apply_fade_edges(b"", fade_sec=0.04, sample_rate=24000)
     assert result == b""
     print("  ✅ Empty bytes → empty bytes")
 
     # Very short audio (< 4 bytes)
-    result = SvaraTTSService._apply_fade_edges(b"\x00\x01", fade_sec=0.04, sample_rate=24000)
+    result = apply_fade_edges(b"\x00\x01", fade_sec=0.04, sample_rate=24000)
     assert result == b"\x00\x01"
     print("  ✅ Very short audio → passed through unchanged")
 
     # Audio shorter than fade duration
     short_pcm = generate_sine_pcm(freq_hz=440, duration_sec=0.01, sample_rate=24000)
-    result = SvaraTTSService._apply_fade_edges(short_pcm, fade_sec=0.04, sample_rate=24000)
+    result = apply_fade_edges(short_pcm, fade_sec=0.04, sample_rate=24000)
     assert len(result) == len(short_pcm)
     print(f"  ✅ Short audio ({len(short_pcm)} bytes) → same length, no crash")
 
     # Crossfade with empty
     pcm = generate_sine_pcm(freq_hz=440, duration_sec=0.5, sample_rate=24000)
-    result = SvaraTTSService._crossfade_pcm(b"", pcm, fade_sec=0.04, sample_rate=24000)
+    result = crossfade_pcm(b"", pcm, fade_sec=0.04, sample_rate=24000)
     assert result == pcm
     print("  ✅ Crossfade with empty first → returns second")
 
-    result = SvaraTTSService._crossfade_pcm(pcm, b"", fade_sec=0.04, sample_rate=24000)
+    result = crossfade_pcm(pcm, b"", fade_sec=0.04, sample_rate=24000)
     assert result == pcm
     print("  ✅ Crossfade with empty second → returns first")
 
     # Chunk text edge cases
-    assert SvaraTTSService._chunk_text("") == [""]  or SvaraTTSService._chunk_text("") == []
+    assert chunk_text("") == [""]  or chunk_text("") == []
     print("  ✅ Chunk empty text → no crash")
 
-    assert SvaraTTSService._chunk_text("Hi") == ["Hi"]
+    assert chunk_text("Hi") == ["Hi"]
     print("  ✅ Chunk tiny text → single chunk")
 
     print("  ✅ All edge case tests passed!")
@@ -303,8 +306,8 @@ def main():
 
     print("=" * 60)
     print("MIRA TTS Audio Quality Tests (Local)")
-    print(f"Settings: CHUNK_TARGET={_CHUNK_TARGET}, CHUNK_MAX={_CHUNK_MAX}, "
-          f"CHUNK_MIN={_CHUNK_MIN}, CROSSFADE={_CROSSFADE_SEC}s")
+    print(f"Settings: CHUNK_TARGET={CHUNK_TARGET}, CHUNK_MAX={CHUNK_MAX}, "
+          f"CHUNK_MIN={CHUNK_MIN}, CROSSFADE={CROSSFADE_SEC}s")
     print("=" * 60)
 
     # Run tests

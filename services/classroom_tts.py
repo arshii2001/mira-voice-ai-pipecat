@@ -9,10 +9,16 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, List, Optional
 
 import aiohttp
 
+from pipecat.frames.frames import TTSAudioRawFrame
+from services.audio_utils import (
+    apply_fade_edges,
+    chunk_text,
+    crossfade_pcm,
+)
 from services.svara_tts import SvaraTTSService
 
 logger = logging.getLogger(__name__)
@@ -167,20 +173,86 @@ class SvaraClassroomTTS:
         )
 
     async def run_tts(self, text: str) -> AsyncGenerator[AudioChunk, None]:
-        """Synthesize text via Svara WS and yield AudioChunk objects (blocking)."""
+        """Synthesize text via Svara WS and yield AudioChunk objects.
+
+        Handles:
+        - Text chunking for long text (prevents max_tokens truncation)
+        - Crossfade between chunks (eliminates pops at chunk boundaries)
+        - Fade-in / fade-out on edges (eliminates start/end pops)
+        """
         if not text.strip():
             return
 
         import time as _time
         t0 = _time.monotonic()
+        sr = self._sample_rate
+        chunk_size = 4096  # PCM bytes per yielded AudioChunk
 
         try:
-            async for frame in self._service._svara_ws_stream(text, t0):
-                if hasattr(frame, "audio") and frame.audio:
-                    yield AudioChunk(
-                        audio=frame.audio,
-                        sample_rate=getattr(frame, "sample_rate", self._sample_rate),
+            chunks = chunk_text(text)
+            logger.info(
+                f"[ClassroomTTS] Svara: {len(text)} chars → {len(chunks)} chunk(s)"
+            )
+
+            if len(chunks) == 1:
+                # ── Single chunk: collect under semaphore, then fade + yield ──
+                raw_pcm = b""
+                async with SvaraTTSService._svara_semaphore:
+                    async for frame in self._service._svara_ws_stream(text, t0):
+                        if not isinstance(frame, TTSAudioRawFrame) or not frame.audio:
+                            continue
+                        raw_pcm += frame.audio
+
+                # Apply fades and yield (outside semaphore)
+                if raw_pcm:
+                    raw_pcm = apply_fade_edges(raw_pcm, sample_rate=sr)
+                    for i in range(0, len(raw_pcm), chunk_size):
+                        yield AudioChunk(
+                            audio=raw_pcm[i:i + chunk_size],
+                            sample_rate=sr,
+                        )
+            else:
+                # ── Multi-chunk: collect per chunk under semaphore, crossfade, yield ──
+                combined_pcm = b""
+
+                for ci, ct in enumerate(chunks):
+                    logger.info(
+                        f"[ClassroomTTS] chunk {ci+1}/{len(chunks)} "
+                        f"({len(ct)} chars): '{ct[:60]}...'"
                     )
+                    chunk_pcm = b""
+                    ct0 = _time.monotonic()
+                    # Semaphore per-chunk: released between chunks so voice
+                    # pipeline can interleave if needed.
+                    async with SvaraTTSService._svara_semaphore:
+                        async for frame in self._service._svara_ws_stream(ct, ct0):
+                            if isinstance(frame, TTSAudioRawFrame) and frame.audio:
+                                chunk_pcm += frame.audio
+
+                    if not chunk_pcm:
+                        continue
+
+                    if combined_pcm:
+                        combined_pcm = crossfade_pcm(
+                            combined_pcm, chunk_pcm, sample_rate=sr
+                        )
+                    else:
+                        combined_pcm = chunk_pcm
+
+                # Apply fade edges and yield (outside semaphore)
+                if combined_pcm:
+                    combined_pcm = apply_fade_edges(
+                        combined_pcm, sample_rate=sr
+                    )
+                    for i in range(0, len(combined_pcm), chunk_size):
+                        yield AudioChunk(
+                            audio=combined_pcm[i:i + chunk_size],
+                            sample_rate=sr,
+                        )
+
+            total_ms = (_time.monotonic() - t0) * 1000
+            logger.info(f"[ClassroomTTS] Svara done in {total_ms:.0f}ms")
+
         except asyncio.CancelledError:
             logger.info("ClassroomTTS (Svara) cancelled")
             raise

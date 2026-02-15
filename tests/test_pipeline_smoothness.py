@@ -146,21 +146,22 @@ def save_wav(filename, pcm, sr=24000):
 
 def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
     """Test fade edges, crossfade, and pop elimination."""
-    from services.svara_tts import (
-        SvaraTTSService, _CHUNK_TARGET, _CHUNK_MAX, _CHUNK_MIN, _CROSSFADE_SEC
+    from services.audio_utils import (
+        CHUNK_TARGET, CHUNK_MAX, CHUNK_MIN, CROSSFADE_SEC,
+        apply_fade_edges, crossfade_pcm,
     )
 
     SECTION = "TTS Audio Quality"
     print(f"\n{'=' * 60}")
     print(f"1. {SECTION}")
-    print(f"   CROSSFADE_SEC={_CROSSFADE_SEC}, CHUNK_TARGET={_CHUNK_TARGET}")
+    print(f"   CROSSFADE_SEC={CROSSFADE_SEC}, CHUNK_TARGET={CHUNK_TARGET}")
     print(f"{'=' * 60}")
 
     sr = 24000
 
     # 1a. Fade edges produce zero-start/end
     pcm = generate_sine_pcm(freq_hz=440, duration_sec=0.5, sr=sr)
-    faded = SvaraTTSService._apply_fade_edges(pcm, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    faded = apply_fade_edges(pcm, fade_sec=CROSSFADE_SEC, sample_rate=sr)
     arr = pcm_to_array(faded)
 
     if abs(arr[0]) < 100 and abs(arr[-1]) < 100:
@@ -189,8 +190,8 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
     raw_jump = abs(float(raw_arr[join]) - float(raw_arr[join - 1]))
 
     # Faded concatenation (each sentence gets fade_edges applied)
-    fa = SvaraTTSService._apply_fade_edges(sent_a, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    fb = SvaraTTSService._apply_fade_edges(sent_b, fade_sec=_CROSSFADE_SEC, sample_rate=sr)
+    fa = apply_fade_edges(sent_a, fade_sec=CROSSFADE_SEC, sample_rate=sr)
+    fb = apply_fade_edges(sent_b, fade_sec=CROSSFADE_SEC, sample_rate=sr)
     faded_arr = pcm_to_array(fa + fb)
     faded_jump = abs(float(faded_arr[join]) - float(faded_arr[join - 1]))
 
@@ -202,9 +203,9 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
                     f"raw={raw_jump:.0f} → faded={faded_jump:.0f}")
 
     # 1g. Crossfade for multi-chunk
-    merged = SvaraTTSService._crossfade_pcm(sent_a, sent_b,
-                                             fade_sec=_CROSSFADE_SEC, sample_rate=sr)
-    expected_len = len(sent_a)//2 + len(sent_b)//2 - int(_CROSSFADE_SEC * sr)
+    merged = crossfade_pcm(sent_a, sent_b,
+                            fade_sec=CROSSFADE_SEC, sample_rate=sr)
+    expected_len = len(sent_a)//2 + len(sent_b)//2 - int(CROSSFADE_SEC * sr)
     arr_m = pcm_to_array(merged)
     if abs(len(arr_m) - expected_len) < 4:
         report.ok(SECTION, "Crossfade length correct",
@@ -228,7 +229,7 @@ def test_tts_audio_quality(save_wavs=False, output_dir="/tmp/mira-smooth"):
 
 def test_tts_streaming_logic():
     """Verify the streaming TTS path emits audio incrementally, not all-at-once."""
-    from services.svara_tts import SvaraTTSService, _CROSSFADE_SEC
+    from services.svara_tts import SvaraTTSService
 
     SECTION = "TTS Streaming Logic"
     print(f"\n{'=' * 60}")
@@ -440,19 +441,19 @@ def test_classroom_delivery():
 
 def test_text_chunking():
     """Verify text chunking produces TTS-friendly segments."""
-    from services.svara_tts import (
-        SvaraTTSService, _CHUNK_TARGET, _CHUNK_MAX, _CHUNK_MIN
+    from services.audio_utils import (
+        CHUNK_TARGET, CHUNK_MAX, CHUNK_MIN, chunk_text,
     )
 
     SECTION = "Text Chunking"
     print(f"\n{'=' * 60}")
     print(f"5. {SECTION}")
-    print(f"   TARGET={_CHUNK_TARGET}, MAX={_CHUNK_MAX}, MIN={_CHUNK_MIN}")
+    print(f"   TARGET={CHUNK_TARGET}, MAX={CHUNK_MAX}, MIN={CHUNK_MIN}")
     print(f"{'=' * 60}")
 
     # 5a. Short text → no split
     short = "Hello, how are you?"
-    chunks = SvaraTTSService._chunk_text(short)
+    chunks = chunk_text(short)
     if len(chunks) == 1 and chunks[0] == short:
         report.ok(SECTION, f"Short text ({len(short)} chars) → 1 chunk")
     else:
@@ -466,8 +467,8 @@ def test_text_chunking():
         "They can make detailed recommendations to users and experts. "
         "They can act independently, replacing the need for human intelligence or intervention."
     )
-    chunks = SvaraTTSService._chunk_text(long_en)
-    all_ok = all(len(c) <= _CHUNK_MAX for c in chunks)
+    chunks = chunk_text(long_en)
+    all_ok = all(len(c) <= CHUNK_MAX for c in chunks)
     if len(chunks) > 1 and all_ok:
         sizes = [len(c) for c in chunks]
         report.ok(SECTION, f"Long English ({len(long_en)} chars) → {len(chunks)} chunks",
@@ -482,27 +483,27 @@ def test_text_chunking():
         "हमारा लक्ष्य है कि हर भारतीय अपनी भाषा में गर्व से बात कर सके। "
         "चलिए इस सफर में हमारे साथ जुड़िये।"
     )
-    chunks = SvaraTTSService._chunk_text(hindi)
-    all_ok = all(len(c) <= _CHUNK_MAX for c in chunks)
+    chunks = chunk_text(hindi)
+    all_ok = all(len(c) <= CHUNK_MAX for c in chunks)
     if all_ok:
         report.ok(SECTION, f"Hindi text ({len(hindi)} chars) → {len(chunks)} chunks",
-                  f"all ≤ {_CHUNK_MAX}")
+                  f"all ≤ {CHUNK_MAX}")
     else:
-        over = [c for c in chunks if len(c) > _CHUNK_MAX]
+        over = [c for c in chunks if len(c) > CHUNK_MAX]
         report.fail(SECTION, f"Hindi chunk exceeds max: {[len(c) for c in over]}")
 
     # 5d. No chunk smaller than MIN (except single-chunk case)
     for text_name, text in [("English", long_en), ("Hindi", hindi)]:
-        chunks = SvaraTTSService._chunk_text(text)
-        tiny = [c for c in chunks if len(c) < _CHUNK_MIN and len(chunks) > 1]
+        chunks = chunk_text(text)
+        tiny = [c for c in chunks if len(c) < CHUNK_MIN and len(chunks) > 1]
         if not tiny:
-            report.ok(SECTION, f"{text_name}: no tiny chunks (all ≥ {_CHUNK_MIN})")
+            report.ok(SECTION, f"{text_name}: no tiny chunks (all ≥ {CHUNK_MIN})")
         else:
             report.warn(SECTION, f"{text_name}: tiny chunks found: {[len(c) for c in tiny]}")
 
     # 5e. Edge cases
-    empty_chunks = SvaraTTSService._chunk_text("")
-    tiny_chunks = SvaraTTSService._chunk_text("Hi")
+    empty_chunks = chunk_text("")
+    tiny_chunks = chunk_text("Hi")
     if len(tiny_chunks) == 1:
         report.ok(SECTION, "Edge cases: empty/tiny text handled gracefully")
     else:

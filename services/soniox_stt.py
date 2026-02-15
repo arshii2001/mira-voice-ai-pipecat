@@ -404,8 +404,20 @@ class SonioxSTTService(FrameProcessor):
         await self._disconnect()
 
     async def cancel(self, frame: CancelFrame):
-        """Cancel - but keep connection open for barge-in."""
+        """Cancel — disconnect Soniox to free the concurrent connection slot.
+
+        Previously we kept the connection open for barge-in, but when the
+        pipeline is fully cancelled (e.g. page refresh / client disconnect),
+        the EndFrame never arrives and the Soniox WebSocket lingers until
+        idle timeout, blocking new sessions from connecting.
+        """
         self._interrupted = True
+        self._pipeline_stopped = True
+        # Cancel idle keepalive
+        if self._idle_keepalive_task and not self._idle_keepalive_task.done():
+            self._idle_keepalive_task.cancel()
+            self._idle_keepalive_task = None
+        await self._disconnect()
 
     async def _connect(self):
         """Establish persistent WebSocket connection to Soniox server."""

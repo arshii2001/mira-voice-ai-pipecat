@@ -17,3 +17,5 @@ PyJWT>=2.9.0
 # Voice eval: generate student audio from text prompts
 gTTS>=2.5.0
 pydub>=0.25.0
+# E2E audio loop: Whisper for verifying bot audio output
+openai-whisper>=20231117

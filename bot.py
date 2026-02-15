@@ -755,11 +755,21 @@ class TextAudioSyncNotifier(FrameProcessor):
     def __init__(self, text_forwarder: TextStreamForwarder, name: str = "TextAudioSyncNotifier", **kwargs):
         super().__init__(name=name, **kwargs)
         self._text_forwarder = text_forwarder
+        # Counter of in-flight TTS sentences (incremented on TTSStartedFrame,
+        # decremented on TTSStoppedFrame).  With async Svara, each sentence
+        # gets its own TTSStartedFrame/TTSStoppedFrame pair.  A simple boolean
+        # would go False after sentence 1's TTSStoppedFrame, causing premature
+        # bot_text_complete while sentences 2+ are still playing.
+        self._tts_in_flight = 0
 
     async def _send_complete_if_done(self):
-        """Send bot_text_complete if the LLM response is finished and all sentences released."""
+        """Send bot_text_complete if the LLM response is finished, all sentences
+        released, AND TTS has finished generating audio for ALL sentences."""
         fwd = self._text_forwarder
-        if not fwd._in_response and fwd._sentence_q.empty() and fwd._current_response:
+        if (not fwd._in_response
+                and fwd._sentence_q.empty()
+                and fwd._current_response
+                and self._tts_in_flight <= 0):
             fwd._stop_watchdog()
             try:
                 await fwd._websocket.send_json({
@@ -779,11 +789,34 @@ class TextAudioSyncNotifier(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TTSStartedFrame):
-            # TTS just started speaking a sentence — release text to client
-            await self._text_forwarder.release_next_sentence()
+            self._tts_in_flight += 1
+            logger.debug(f"[TEXT_SYNC] TTSStartedFrame — in_flight={self._tts_in_flight}")
+            # TTS just started speaking — release ALL pending sentence text
+            # to the client.  We release ALL (not just one) because the TTS
+            # aggregator may merge multiple TextStreamForwarder sentences into
+            # a single run_tts() call (e.g. Hindi text where NLTK doesn't
+            # split on '।').  In that case there's only one TTSStartedFrame
+            # but N sentences queued.  Releasing all ensures text appears
+            # on screen as soon as audio begins.
+            fwd = self._text_forwarder
+            released = 0
+            while not fwd._sentence_q.empty():
+                await fwd.release_next_sentence()
+                released += 1
+            if released > 1:
+                logger.debug(f"[TEXT_SYNC] Released {released} sentences on TTSStartedFrame")
+            # NOTE: Do NOT call _send_complete_if_done() here.  TTS is still
+            # generating audio.  Wait for TTSStoppedFrame to finalize.
 
         elif isinstance(frame, TTSStoppedFrame):
-            # After each sentence's audio finishes, check if we're done
+            # The Svara drainer only pushes TTSStoppedFrame after the LAST
+            # sentence (intermediate sentences skip it to keep the client's
+            # audio stream continuous).  So when we see it, ALL sentences
+            # are done — reset the counter to 0 rather than decrementing.
+            prev = self._tts_in_flight
+            self._tts_in_flight = 0
+            logger.debug(f"[TEXT_SYNC] TTSStoppedFrame — in_flight={prev}→0")
+            # Finalize now that all TTS is done
             await self._send_complete_if_done()
 
         elif isinstance(frame, LLMFullResponseEndFrame):
@@ -797,7 +830,8 @@ class TextAudioSyncNotifier(FrameProcessor):
             await self._send_complete_if_done()
 
         elif isinstance(frame, StartInterruptionFrame):
-            # On barge-in, flush remaining text immediately and send complete
+            # On barge-in, reset in-flight counter and flush text
+            self._tts_in_flight = 0
             fwd = self._text_forwarder
             await fwd.flush_all_queued()
             if fwd._current_response:
@@ -1209,7 +1243,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" | "male"
 TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
 TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")          # API key for Svara TTS auth
-TTS_MAX_TOKENS = int(os.getenv("TTS_MAX_TOKENS", "350"))   # Max tokens per Svara TTS request (text is chunked by sentence)
+TTS_MAX_TOKENS = int(os.getenv("TTS_MAX_TOKENS", "4500"))   # Max tokens per Svara TTS request (text is chunked by sentence)
 TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova")  # For OpenAI TTS provider
 

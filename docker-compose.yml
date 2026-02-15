@@ -202,6 +202,7 @@ services:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
     volumes:
       - ./tests/eval_audio_output:/app/tests/eval_audio_output
+      - ./tests/stt_verify_output:/app/tests/stt_verify_output
     networks:
       - mira-network
     depends_on:
