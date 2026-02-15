@@ -210,7 +210,12 @@ async def test_text_only_streams_tokens():
 
 
 async def test_audio_mode_queues_sentences():
-    """text_and_audio mode: sentences queued, NOT sent until TTSStartedFrame."""
+    """text_and_audio mode: sentences queued, NOT sent until TTSStartedFrame.
+
+    The notifier releases ALL pending sentences on a single TTSStartedFrame
+    because Pipecat's TTS aggregator may merge multiple sentences into one
+    run_tts() call (e.g. Hindi text where NLTK doesn't split on '।').
+    """
     ws = MockWebSocket("audio-queue")
     fwd = TextStreamForwarder(websocket=ws, text_only=False)
     notifier = TextAudioSyncNotifier(text_forwarder=fwd)
@@ -224,25 +229,16 @@ async def test_audio_mode_queues_sentences():
     assert fwd._sentence_q.qsize() == 2, f"Expected 2 queued, got {fwd._sentence_q.qsize()}"
     assert len(ws.get_messages_of_type("bot_text")) == 0, "No bot_text should be sent yet"
 
-    # Simulate TTS starting first sentence
+    # Simulate TTS starting — ALL queued sentences are released at once
     await notifier.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
 
-    # First sentence should now be released
+    # Both sentences should now be released
     bot_texts = ws.get_messages_of_type("bot_text")
-    assert len(bot_texts) == 1, f"Expected 1 bot_text after first TTSStarted, got {len(bot_texts)}"
+    assert len(bot_texts) == 2, f"Expected 2 bot_text after TTSStarted (release-all), got {len(bot_texts)}"
     assert bot_texts[0]["text"] == "Hello there."
-
-    # Queue should have 1 left
-    assert fwd._sentence_q.qsize() == 1
-
-    # Simulate TTS starting second sentence
-    await notifier.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
-
-    bot_texts = ws.get_messages_of_type("bot_text")
-    assert len(bot_texts) == 2
     assert bot_texts[1]["text"] == "How are you?"
 
-    # Queue empty
+    # Queue should be empty
     assert fwd._sentence_q.qsize() == 0
 
     # Metrics
@@ -369,7 +365,12 @@ async def test_tts_timeout_watchdog():
 
 
 async def test_barge_in_flushes_queue():
-    """StartInterruptionFrame flushes all queued text immediately."""
+    """StartInterruptionFrame flushes all queued text immediately.
+
+    With release-all behavior, TTSStartedFrame releases ALL queued sentences.
+    So after TTS starts, queue is already empty. Barge-in then flushes nothing
+    extra but still sends bot_text_complete.
+    """
     ws = MockWebSocket("barge-in")
     fwd = TextStreamForwarder(websocket=ws, text_only=False)
     notifier = TextAudioSyncNotifier(text_forwarder=fwd)
@@ -382,22 +383,21 @@ async def test_barge_in_flushes_queue():
 
     assert fwd._sentence_q.qsize() == 3
 
-    # Only release first via TTS
+    # TTS starts — releases ALL 3 sentences at once (release-all behavior)
     await notifier.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
-    assert fwd._sentence_q.qsize() == 2
+    assert fwd._sentence_q.qsize() == 0  # All released
 
     # Barge-in!
     await fwd.process_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
     await notifier.process_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
 
-    # All remaining should be flushed
+    # Queue already empty, all 3 were TTS-released
     assert fwd._sentence_q.qsize() == 0
     bot_texts = ws.get_messages_of_type("bot_text")
-    assert len(bot_texts) == 3, f"Expected 3 bot_text (1 TTS + 2 flushed), got {len(bot_texts)}"
+    assert len(bot_texts) == 3, f"Expected 3 bot_text (all TTS-released), got {len(bot_texts)}"
 
-    # Metrics
-    assert fwd._metrics_sentences_released == 1
-    assert fwd._metrics_sentences_flushed >= 2
+    # Metrics: all 3 released via TTS, none flushed by barge-in
+    assert fwd._metrics_sentences_released == 3
     assert fwd._metrics_total_interruptions == 1
 
     return True
@@ -550,7 +550,13 @@ async def test_empty_response():
 
 
 async def test_safety_net_flush_on_llm_end():
-    """If TTS never fires, LLMFullResponseEndFrame at notifier flushes remaining."""
+    """If TTS never fires, LLMFullResponseEndFrame at notifier flushes remaining.
+
+    When TTS never starts (in_flight == 0) and the queue still has sentences,
+    the notifier's LLMFullResponseEndFrame handler acts as a safety net:
+    it flushes all remaining queued text so the client sees the response,
+    then sends bot_text_complete.
+    """
     ws = MockWebSocket("safety-net")
     fwd = TextStreamForwarder(websocket=ws, text_only=False)
     notifier = TextAudioSyncNotifier(text_forwarder=fwd)
@@ -566,7 +572,7 @@ async def test_safety_net_flush_on_llm_end():
     # LLMFullResponseEndFrame reaches notifier (safety net)
     await notifier.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
 
-    # Both should be flushed
+    # Both should be flushed by the safety net
     bot_texts = ws.get_messages_of_type("bot_text")
     assert len(bot_texts) == 2, f"Expected 2 flushed, got {len(bot_texts)}"
     assert fwd._metrics_sentences_flushed == 2
@@ -1112,6 +1118,8 @@ async def test_barge_in_under_load():
     """
     Multiple concurrent pipelines, one gets interrupted mid-stream.
     Verifies barge-in only affects the interrupted pipeline.
+
+    With release-all behavior, TTSStartedFrame releases ALL queued sentences.
     """
     # Pipeline A: will be interrupted
     ws_a = MockWebSocket("barge-target")
@@ -1135,35 +1143,37 @@ async def test_barge_in_under_load():
     assert fwd_a._sentence_q.qsize() == 3
     assert fwd_b._sentence_q.qsize() == 3
 
-    # Release first sentence for both
+    # TTS starts for both — releases ALL queued sentences (release-all)
     await notifier_a.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
     await notifier_b.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
+
+    # Both queues now empty (all released)
+    assert fwd_a._sentence_q.qsize() == 0
+    assert fwd_b._sentence_q.qsize() == 0
 
     # Interrupt A only
     await fwd_a.process_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
     await notifier_a.process_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
 
-    # A should have all text flushed
-    assert fwd_a._sentence_q.qsize() == 0
+    # A should have all 3 texts (all TTS-released before barge-in)
     a_texts = ws_a.get_messages_of_type("bot_text")
-    assert len(a_texts) == 3  # 1 TTS-released + 2 flushed
+    assert len(a_texts) == 3, f"Expected 3 bot_text for A, got {len(a_texts)}"
 
-    # B should be unaffected — still has 2 in queue
-    assert fwd_b._sentence_q.qsize() == 2
+    # B should also have all 3 texts (all TTS-released, unaffected by A's barge-in)
     b_texts = ws_b.get_messages_of_type("bot_text")
-    assert len(b_texts) == 1  # Only the 1 TTS-released
+    assert len(b_texts) == 3, f"Expected 3 bot_text for B, got {len(b_texts)}"
 
     # Complete B normally
-    for _ in range(2):
-        await notifier_b.process_frame(TTSStartedFrame(), FrameDirection.DOWNSTREAM)
-        await notifier_b.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
+    await notifier_b.process_frame(TTSStoppedFrame(), FrameDirection.DOWNSTREAM)
     await fwd_b.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
     await notifier_b.process_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
 
-    b_texts = ws_b.get_messages_of_type("bot_text")
-    assert len(b_texts) == 3
     b_completes = ws_b.get_messages_of_type("bot_text_complete")
     assert len(b_completes) == 1
+
+    # Verify isolation: B's metrics unaffected by A's interruption
+    assert fwd_b._metrics_total_interruptions == 0
+    assert fwd_a._metrics_total_interruptions == 1
 
     return True
 

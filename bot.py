@@ -820,13 +820,20 @@ class TextAudioSyncNotifier(FrameProcessor):
             await self._send_complete_if_done()
 
         elif isinstance(frame, LLMFullResponseEndFrame):
-            # LLM is done producing text.  Do NOT flush remaining queued
-            # sentences here — they still need to be synthesised by TTS.
-            # The TTSStoppedFrame handler above will call _send_complete_if_done()
-            # after the last sentence's audio finishes.
+            # LLM is done producing text.
+            # If TTS is actively processing (in_flight > 0), wait for
+            # TTSStoppedFrame to finalize — sentences are being spoken.
             #
-            # However, if the queue is already empty (TTS already processed
-            # everything), we should finalize now.
+            # If TTS never started (in_flight == 0) but the queue still has
+            # sentences, this is a safety-net scenario (TTS errored or was
+            # skipped).  Flush all remaining text so the client sees it.
+            fwd = self._text_forwarder
+            if self._tts_in_flight <= 0 and not fwd._sentence_q.empty():
+                logger.info(
+                    f"[TEXT_SYNC] Safety-net flush: TTS never started, "
+                    f"flushing {fwd._sentence_q.qsize()} queued sentences"
+                )
+                await fwd.flush_all_queued()
             await self._send_complete_if_done()
 
         elif isinstance(frame, StartInterruptionFrame):

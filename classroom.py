@@ -668,27 +668,15 @@ class RoomManager:
     ) -> dict:
         """Deliver a single sentence chunk to one listener (translate if needed, TTS if audio mode).
 
-        Uses a per-user lock to serialize delivery so audio frames from different
-        sentences never interleave on the same WebSocket connection.
+        Text (bot_text) is sent immediately — never blocked by TTS.
+        Audio is serialized via per-user _audio_lock so binary frames from
+        different sentences never interleave on the same WebSocket.
 
         Returns a timing dict: {user, language, mode, translate_ms, tts_ms, audio_bytes, total_ms}
         """
-        async with user._audio_lock:
-            return await self._deliver_sentence_to_listener_inner(
-                user, sentence, source_lang, is_final
-            )
-
-    async def _deliver_sentence_to_listener_inner(
-        self,
-        user: RoomUser,
-        sentence: str,
-        source_lang: str,
-        is_final: bool,
-    ) -> dict:
-        """Inner delivery logic — always called under user._audio_lock."""
         t_start = time.time()
         try:
-            # ── Translation ──
+            # ── Translation (no lock needed) ──
             t_translate_start = time.time()
             if user.language != source_lang and self._translator:
                 translated = await self._translator.translate(
@@ -709,7 +697,9 @@ class RoomManager:
                 )
                 _metrics_collector.record_translation(translate_ms)
 
-            # Send streamed text chunk
+            # Send streamed text chunk IMMEDIATELY — not gated by audio lock.
+            # This ensures listeners see text even while greeting/previous TTS
+            # is still playing.
             await self._send_json(user.websocket, {
                 "type": "bot_text",
                 "text": translated,
@@ -718,28 +708,29 @@ class RoomManager:
                 "target_language": user.language,
             })
 
-            # TTS for audio-mode listeners
+            # TTS for audio-mode listeners — acquire lock only for audio portion
             tts_ms = 0.0
             tts_first_byte_ms = 0.0
             audio_bytes = 0
             audio_chunks = 0
             if self._tts and user.mode == "text_and_audio":
-                t_tts_start = time.time()
-                await self._send_json(user.websocket, {"type": "bot_audio_start"})
-                try:
-                    async for frame in self._tts.run_tts(translated):
-                        if hasattr(frame, "audio") and frame.audio:
-                            if audio_chunks == 0:
-                                tts_first_byte_ms = round((time.time() - t_tts_start) * 1000, 1)
-                            await self._send_bytes(user.websocket, frame.audio)
-                            audio_bytes += len(frame.audio)
-                            audio_chunks += 1
-                except Exception as tts_err:
-                    logger.warning(f"[CLASSROOM] Sentence TTS error for {user.name}: {tts_err}")
-                    _metrics_collector.record_error("listener_tts")
-                await self._send_json(user.websocket, {"type": "bot_audio_end"})
-                tts_ms = round((time.time() - t_tts_start) * 1000, 1)
-                _metrics_collector.record_tts(tts_ms, audio_bytes)
+                async with user._audio_lock:
+                    t_tts_start = time.time()
+                    await self._send_json(user.websocket, {"type": "bot_audio_start"})
+                    try:
+                        async for frame in self._tts.run_tts(translated):
+                            if hasattr(frame, "audio") and frame.audio:
+                                if audio_chunks == 0:
+                                    tts_first_byte_ms = round((time.time() - t_tts_start) * 1000, 1)
+                                await self._send_bytes(user.websocket, frame.audio)
+                                audio_bytes += len(frame.audio)
+                                audio_chunks += 1
+                    except Exception as tts_err:
+                        logger.warning(f"[CLASSROOM] Sentence TTS error for {user.name}: {tts_err}")
+                        _metrics_collector.record_error("listener_tts")
+                    await self._send_json(user.websocket, {"type": "bot_audio_end"})
+                    tts_ms = round((time.time() - t_tts_start) * 1000, 1)
+                    _metrics_collector.record_tts(tts_ms, audio_bytes)
             elif not self._tts and user.mode == "text_and_audio":
                 logger.warning(f"[CLASSROOM] No TTS available for audio-mode listener {user.name}")
 
@@ -846,9 +837,20 @@ class RoomManager:
         token_count: int = 0
         sentence_count: int = 0
 
-        # Detect speaker's registered language
+        # Detect speaker's language — prefer actual text language detection
+        # over registered language, since users may switch languages mid-session.
         if room and room.speaker_id and room.speaker_id in room.users:
-            source_lang = _normalize_classroom_language(room.users[room.speaker_id].language or "en") or "en"
+            registered_lang = _normalize_classroom_language(room.users[room.speaker_id].language or "en") or "en"
+            # Detect the actual language of the question text
+            detected_lang = self._detect_text_language(question) if len(question) >= 5 else registered_lang
+            source_lang = detected_lang
+            # Update the user's language if they switched
+            if detected_lang != registered_lang:
+                room.users[room.speaker_id].language = detected_lang
+                logger.info(
+                    f"[CLASSROOM] Speaker language updated in text mode: "
+                    f"{registered_lang} → {detected_lang} (detected from question text)"
+                )
 
         # ── CRITICAL: Ensure language tag is always present ──
         # The voice pipeline (SonioxSTT) adds [User is speaking X] tags,
@@ -1985,10 +1987,23 @@ class RoomManager:
 
         # Prompt the newly assigned speaker:
         # Short handback line when speaker token changes.
+        # Translate to the speaker's language if not English.
         speaker = room.users.get(user_id)
         if speaker:
             template = random.choice(self._SPEAKER_HANDBACK_LINES)
             prompt_text = template.format(name=speaker.name)
+
+            if speaker.language and speaker.language != "en" and self._translator:
+                try:
+                    translated = await self._translator.translate(
+                        text=prompt_text,
+                        target_lang=speaker.language,
+                        source_lang="en",
+                    )
+                    if translated:
+                        prompt_text = translated
+                except Exception as e:
+                    logger.warning(f"[CLASSROOM] Handback translation failed for {speaker.name}: {e}")
 
             await self._send_json(speaker.websocket, {
                 "type": "bot_text_complete",
@@ -2359,6 +2374,7 @@ room_manager = RoomManager()
 from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     Frame,
+    StartInterruptionFrame,
     TextFrame,
     TranscriptionFrame,
     LLMFullResponseEndFrame,
@@ -2408,6 +2424,20 @@ class ClassroomBroadcaster(FrameProcessor):
             self._last_user_lang = getattr(frame, "language", "en") or "en"
             self._turn_count += 1
             self._awaiting_bot_audio_end = False
+
+            # ── Dynamic language update ──
+            # If the STT detects a different language than the speaker's
+            # registered language, update it so translations and listener
+            # delivery use the correct source language.
+            if self._room.speaker_id and self._room.speaker_id in self._room.users:
+                speaker_user = self._room.users[self._room.speaker_id]
+                if speaker_user.language != self._last_user_lang:
+                    old_lang = speaker_user.language
+                    speaker_user.language = self._last_user_lang
+                    logger.info(
+                        f"[CLASSROOM] Speaker {speaker_user.name} language updated: "
+                        f"{old_lang} → {self._last_user_lang} (detected by STT)"
+                    )
 
             logger.info(
                 f"[METRICS][CLASSROOM] stt_received | turn={self._turn_count} | "
@@ -2530,6 +2560,44 @@ class ClassroomBroadcaster(FrameProcessor):
                 )
                 if self._room.room_type == "discussion" and self._room.speaker_id:
                     self._awaiting_bot_audio_end = True
+
+        # ── Barge-in: user interrupted the bot mid-response ──
+        # Clear all accumulated buffers so the next response starts fresh.
+        # Cancel pending listener delivery tasks to avoid sending stale
+        # partial translations from the interrupted response.
+        elif isinstance(frame, StartInterruptionFrame):
+            interrupted_len = len(self._llm_buffer)
+            interrupted_clauses = self._clause_count
+            cancelled = 0
+            for task in self._pending_listener_tasks:
+                if not task.done():
+                    task.cancel()
+                    cancelled += 1
+
+            # Save partial response to conversation history so context isn't lost
+            if self._llm_buffer.strip():
+                partial = self._llm_buffer.strip()
+                if self._last_user_text:
+                    self._room.conversation_history.append(
+                        {"role": "user", "content": self._last_user_text}
+                    )
+                self._room.conversation_history.append(
+                    {"role": "assistant", "content": f"{partial} [interrupted]"}
+                )
+                if len(self._room.conversation_history) > 40:
+                    self._room.conversation_history = self._room.conversation_history[-30:]
+
+            self._llm_buffer = ""
+            self._clause_buffer = ""
+            self._pending_listener_tasks = []
+            self._clause_count = 0
+            self._awaiting_bot_audio_end = False
+
+            logger.warning(
+                f"[CLASSROOM] ⚡ BARGE-IN in voice mode | turn={self._turn_count} | "
+                f"interrupted_chars={interrupted_len} | clauses_sent={interrupted_clauses} | "
+                f"listener_tasks_cancelled={cancelled}"
+            )
 
         # Voice mode: arm discussion inactivity timer only after bot audio is fully done.
         elif isinstance(frame, BotStoppedSpeakingFrame):

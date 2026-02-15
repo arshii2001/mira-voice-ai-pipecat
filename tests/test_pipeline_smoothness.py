@@ -403,7 +403,7 @@ def test_classroom_delivery():
 
     # 4b. Listener delivery has [SMOOTH] timing logs
     delivery_source = inspect.getsource(
-        classroom.RoomManager._deliver_sentence_to_listener_inner
+        classroom.RoomManager._deliver_sentence_to_listener
     )
     if "[SMOOTH]" in delivery_source:
         report.ok(SECTION, "[SMOOTH] timing logs in listener delivery",

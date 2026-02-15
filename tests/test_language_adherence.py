@@ -198,7 +198,12 @@ async def api_delete_room(room_id: str):
 
 async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
                     role: str = "student", mode: str = "text_only"):
-    """Send join message and wait for joined event."""
+    """Send join message and wait for joined event.
+
+    After receiving 'joined', drains any follow-up messages from the join flow
+    (token_changed, handback bot_text_complete, greeting bot_text_complete)
+    so they don't interfere with subsequent send_text_and_collect calls.
+    """
     join_msg = {
         "type": "join",
         "user_id": user_id,
@@ -212,6 +217,7 @@ async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
         join_msg["token"] = token
     await ws.send(json.dumps(join_msg))
     # Collect events until we get "joined"
+    joined_msg = None
     events = []
     deadline = time.time() + 5
     while time.time() < deadline:
@@ -221,10 +227,28 @@ async def join_room(ws, room_id: str, user_id: str, name: str, language: str,
                 msg = json.loads(raw)
                 events.append(msg)
                 if msg.get("type") == "joined":
-                    return msg
+                    joined_msg = msg
+                    break
         except asyncio.TimeoutError:
             break
-    raise TimeoutError(f"Never got 'joined' event. Got: {[e.get('type') for e in events]}")
+    if not joined_msg:
+        raise TimeoutError(f"Never got 'joined' event. Got: {[e.get('type') for e in events]}")
+
+    # Drain join-related follow-up messages (token_changed, handback
+    # bot_text_complete, greeting bot_text_complete) so they don't
+    # pollute subsequent send_text_and_collect calls.
+    drain_deadline = time.time() + 5
+    while time.time() < drain_deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=1.5)
+            if isinstance(raw, str):
+                msg = json.loads(raw)
+                events.append(msg)
+                logger.debug(f"[join_room drain] {msg.get('type')}: {str(msg)[:80]}")
+        except asyncio.TimeoutError:
+            break  # No more messages — join flow complete
+
+    return joined_msg
 
 
 async def wait_for_token(ws, expected_speaker: str = None, timeout: float = 30.0) -> dict:

@@ -128,13 +128,28 @@ async def recv_json_nonbinary(ws, timeout: float = 5.0) -> Optional[dict]:
 
 
 async def drain_messages(ws, duration: float = 2.0) -> List[dict]:
-    """Collect all JSON messages for a duration, ignoring binary frames."""
+    """Collect all JSON messages for a duration, ignoring binary frames.
+
+    Uses a short per-recv timeout so binary audio frames are drained quickly
+    without burning the entire duration on a few hundred binary frames.
+    """
     messages = []
-    start = time.time()
-    while time.time() - start < duration:
-        msg = await recv_json(ws, timeout=0.3)
-        if msg:
-            messages.append(msg)
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=0.5)
+            if isinstance(raw, str):
+                try:
+                    messages.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    pass
+            # Binary frames are silently skipped (fast path)
+        except asyncio.TimeoutError:
+            # No messages for 0.5s — if we've been draining for a while, stop early
+            if time.time() - (deadline - duration) > 2.0:
+                break
+        except Exception:
+            break
     return messages
 
 
@@ -505,9 +520,10 @@ async def test_sentence_delivery_ordering() -> TestResult:
         assert len(sp_response.strip()) > 0, "No bot response"
         logger.info(f"  Speaker got response ({len(sp_response)} chars) ✓")
 
-        # Collect listener messages (give extra time for translation + TTS)
-        hi_msgs = await drain_messages(ws_listener_hi, duration=8.0)
-        ta_msgs = await drain_messages(ws_listener_ta, duration=5.0)
+        # Collect listener messages — translation + TTS can take 15-20s for
+        # multi-sentence responses, especially with Hindi/Tamil translation.
+        hi_msgs = await drain_messages(ws_listener_hi, duration=20.0)
+        ta_msgs = await drain_messages(ws_listener_ta, duration=15.0)
 
         # Extract ordered text events
         hi_texts = []
@@ -592,19 +608,40 @@ async def test_audio_lock_serialization() -> TestResult:
         await join_room(ws_listener, room_id, "lst-lock", "AudioListener", "hi", mode="text_and_audio")
         logger.info("  Audio listener (hi, text_and_audio) joined ✓")
 
-        # Wait for greeting audio to complete (greeting triggers TTS for audio listeners)
+        # Wait for greeting audio to fully complete — greeting TTS can take 10-15s
+        # for Hindi translation. We must drain until we see bot_audio_end, otherwise
+        # it leaks into the test's audio event sequence.
         logger.info("  Waiting for greeting audio to complete...")
-        await asyncio.sleep(5.0)
-        # Drain ALL pending messages including binary audio from greeting
-        deadline_drain = time.time() + 5.0
+        greeting_audio_end_seen = False
+        deadline_drain = time.time() + 25.0
         while time.time() < deadline_drain:
             try:
+                raw = await asyncio.wait_for(ws_listener.recv(), timeout=1.0)
+                if isinstance(raw, str):
+                    try:
+                        msg = json.loads(raw)
+                        if msg.get("type") == "bot_audio_end":
+                            greeting_audio_end_seen = True
+                            logger.info("  Greeting bot_audio_end received")
+                    except json.JSONDecodeError:
+                        pass
+                # Keep draining binary frames and other messages
+            except asyncio.TimeoutError:
+                if greeting_audio_end_seen:
+                    break
+                continue
+            except Exception:
+                break
+        # Drain any remaining messages after bot_audio_end
+        await asyncio.sleep(1.0)
+        deadline_extra = time.time() + 3.0
+        while time.time() < deadline_extra:
+            try:
                 raw = await asyncio.wait_for(ws_listener.recv(), timeout=0.3)
-                # Just consume everything
             except (asyncio.TimeoutError, Exception):
                 break
         await drain_messages(ws_speaker, duration=1.0)
-        logger.info("  Greeting audio drained ✓")
+        logger.info(f"  Greeting audio drained (end_seen={greeting_audio_end_seen}) ✓")
 
         # Send a question that produces multiple sentences
         await ws_speaker.send(json.dumps({
@@ -618,30 +655,38 @@ async def test_audio_lock_serialization() -> TestResult:
         assert len(sp_response.strip()) > 0, "No bot response"
         logger.info(f"  Speaker got response ({len(sp_response)} chars) ✓")
 
-        # Collect ALL listener messages (JSON + binary) for a longer period
-        # to capture the full audio delivery pipeline
+        # Collect ALL listener messages (JSON + binary).
+        # Hindi TTS takes 4-14s per sentence, serialized by audio lock,
+        # so 3 sentences can take 12-42s. Use generous timeout.
         audio_events = []  # Track bot_audio_start / bot_audio_end sequence
         binary_count = 0
         text_events = []
-        deadline = time.time() + 20.0
+        got_text_complete = False
+        deadline = time.time() + 90.0
         while time.time() < deadline:
             try:
-                raw = await asyncio.wait_for(ws_listener.recv(), timeout=1.0)
+                raw = await asyncio.wait_for(ws_listener.recv(), timeout=2.0)
                 if isinstance(raw, str):
                     msg = json.loads(raw)
                     if msg.get("type") == "bot_audio_start":
                         audio_events.append("START")
                     elif msg.get("type") == "bot_audio_end":
                         audio_events.append("END")
-                    elif msg.get("type") in ("bot_text", "bot_response", "bot_text_complete"):
+                        # If we've seen text_complete AND audio events are balanced,
+                        # we can stop — all audio has been delivered.
+                        if got_text_complete and audio_events.count("START") == audio_events.count("END"):
+                            logger.info("  All audio START/END balanced after text_complete — done")
+                            break
+                    elif msg.get("type") in ("bot_text", "bot_response"):
                         text_events.append(msg)
                     elif msg.get("type") == "bot_text_complete":
-                        # We've received the complete signal, wait a bit more for audio
-                        deadline = min(deadline, time.time() + 5.0)
+                        text_events.append(msg)
+                        got_text_complete = True
                 elif isinstance(raw, bytes):
                     binary_count += 1
             except asyncio.TimeoutError:
-                if text_events and any(m.get("type") == "bot_text_complete" for m in text_events):
+                # If we already have balanced START/END, we're done
+                if got_text_complete and audio_events and audio_events.count("START") == audio_events.count("END"):
                     break
                 continue
             except Exception:
