@@ -261,36 +261,34 @@ class SvaraClassroomTTS:
 
 
 def create_classroom_tts(sample_rate: int = 24000):
-    """Factory function to create classroom TTS using TTS_PROVIDER env vars."""
-    provider = os.getenv("TTS_PROVIDER", "elevenlabs").strip().lower()
+    """Factory function to create classroom TTS using provider_config."""
+    from provider_config import TTS as tts_cfg
+
+    provider = tts_cfg.provider
 
     if provider == "elevenlabs":
-        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        api_key = tts_cfg.elevenlabs_api_key
         if not api_key:
-            logger.warning("ELEVENLABS_API_KEY not set — classroom audio disabled")
+            logger.warning("ElevenLabs API key not set — classroom audio disabled")
             return None
 
-        voice_gender = os.getenv("TTS_VOICE_GENDER", "female")
         return ElevenLabsClassroomTTS(
             api_key=api_key,
-            voice_gender=voice_gender,
+            voice_gender=tts_cfg.elevenlabs_voice_gender,
             sample_rate=sample_rate,
         )
 
     if provider == "svara":
-        tts_ws_url = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
         tts_base_url = (
-            tts_ws_url
+            tts_cfg.svara_ws_url
             .replace("ws://", "http://")
             .replace("wss://", "https://")
             .rsplit("/v1/", 1)[0]
         )
-        tts_api_key = os.getenv("TTS_WS_API_KEY", "")
-        default_voice = os.getenv("DEFAULT_VOICE", "en_female")
         return SvaraClassroomTTS(
             base_url=tts_base_url,
-            api_key=tts_api_key,
-            voice=default_voice,
+            api_key=tts_cfg.svara_api_key,
+            voice=tts_cfg.svara_voice,
             sample_rate=sample_rate,
         )
 

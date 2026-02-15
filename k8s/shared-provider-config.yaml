@@ -1,0 +1,77 @@
+# ============================================================
+# Shared Provider ConfigMap + Secret
+# All provider endpoints and API keys live here.
+# Both v4-oss (Svara) and v2 (ElevenLabs) deployments reference
+# this shared config. To switch providers, change the selector
+# (STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER) in the per-deployment
+# configmap and restart the pod.
+# ============================================================
+
+---
+# ── Shared Provider ConfigMap (non-sensitive) ──────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mira-provider-config
+  namespace: openwebui
+  labels:
+    app.kubernetes.io/part-of: mira
+data:
+  # ── LLM providers ──
+  LLM_OPENAI_BASE_URL: "https://api.openai.com/v1"
+  LLM_OPENAI_MODEL: "gpt-4o-mini"
+
+  LLM_GROQ_BASE_URL: "https://api.groq.com/openai/v1"
+  LLM_GROQ_MODEL: "openai/gpt-oss-20b"
+
+  LLM_VLLM_BASE_URL: "http://vllm-gpt-oss-120b-b200.bbf23a-prod-cw-3.coreweave.app/v1"
+  LLM_VLLM_MODEL: "openai/gpt-oss-120b"
+
+  # ── TTS providers ──
+  TTS_SVARA_WS_URL: "ws://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream"
+  TTS_SVARA_VOICE: "en_female"
+  TTS_VOICE_GENDER: "female"
+  TTS_SAMPLE_RATE: "24000"
+  TTS_MAX_TOKENS: "4500"
+
+  # ── STT providers ──
+  STT_LANGUAGE_HINTS: "en,hi,ta,kn"
+  STT_SAMPLE_RATE: "16000"
+
+  # ── Common ──
+  HOST: "0.0.0.0"
+  PORT: "7860"
+  LOG_LEVEL: "INFO"
+  PROMPT_VERSION: "v4"
+  CURRICULUM_CONTEXT_MAX_TOKENS: "600"
+
+---
+# ── Shared Provider Secret (all API keys) ─────────────────────
+# USAGE:
+#   1. Copy: cp shared-provider-config.yaml shared-provider-config-local.yaml
+#   2. Fill in base64-encoded keys
+#   3. Apply: kubectl apply -f shared-provider-config-local.yaml
+#
+# To base64-encode: echo -n "your-key" | base64
+# NEVER commit the -local.yaml with real keys!
+# ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mira-provider-secrets
+  namespace: openwebui
+  labels:
+    app.kubernetes.io/part-of: mira
+type: Opaque
+data:
+  # ── LLM keys ──
+  LLM_OPENAI_API_KEY: ""        # echo -n "sk-proj-..." | base64
+  LLM_GROQ_API_KEY: ""          # echo -n "gsk_..." | base64
+  LLM_VLLM_API_KEY: ""          # echo -n "your-vllm-key" | base64
+
+  # ── TTS keys ──
+  TTS_ELEVENLABS_API_KEY: ""    # echo -n "sk_..." | base64
+  TTS_SVARA_API_KEY: ""         # echo -n "inf_..." | base64
+
+  # ── STT keys ──
+  STT_SONIOX_API_KEY: ""        # echo -n "your-soniox-key" | base64

@@ -4,7 +4,9 @@
 # ============================================================
 
 ---
-# ── Pipecat v4-oss ConfigMap ──────────────────────────────────
+# ── Pipecat v4-oss ConfigMap (selectors only) ────────────────
+# Provider endpoints and keys come from shared mira-provider-config/secrets.
+# Only the PROVIDER selectors differ between deployments.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,20 +15,10 @@ metadata:
   labels:
     app: pipecat-v4-oss
 data:
+  # ── Provider selectors (change these + restart to switch) ──
   STT_PROVIDER: "soniox"
-  STT_LANGUAGE_HINTS: "en,hi,ta,kn"
+  LLM_PROVIDER: "groq"
   TTS_PROVIDER: "svara"
-  TTS_WS_URL: "ws://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream"
-  TTS_SAMPLE_RATE: "24000"
-  DEFAULT_VOICE: "en_female"
-  LLM_PROVIDER: "openai"
-  LLM_BASE_URL: "https://api.openai.com/v1"
-  LLM_MODEL: "gpt-4o-mini"
-  HOST: "0.0.0.0"
-  PORT: "7860"
-  LOG_LEVEL: "INFO"
-  PROMPT_VERSION: "v4"
-  CURRICULUM_CONTEXT_MAX_TOKENS: "600"
 
 ---
 # ── OpenWebUI v4-oss ConfigMap ────────────────────────────────
@@ -138,10 +130,15 @@ spec:
               name: http
               protocol: TCP
           envFrom:
+            # Shared provider config (all endpoints + common settings)
+            - configMapRef:
+                name: mira-provider-config
+            # Shared provider secrets (all API keys)
+            - secretRef:
+                name: mira-provider-secrets
+            # Per-deployment selectors (STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER)
             - configMapRef:
                 name: pipecat-v4-oss-config
-            - secretRef:
-                name: pipecat-v4-oss-secrets
           env:
             # Shared JWT secret with OpenWebUI
             - name: WEBUI_SECRET_KEY

@@ -513,15 +513,17 @@ class RoomManager:
 
     def _init_translator(self):
         """Initialize the translator with the same LLM config as bot.py."""
-        api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        from provider_config import LLM
+        api_key = LLM.api_key
+        base_url = LLM.base_url
+        model = LLM.model
 
         if api_key:
             self._translator = Translator(
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
+                is_vllm=LLM.is_vllm,
             )
             logger.info("Classroom translator initialized")
         else:
@@ -541,9 +543,10 @@ class RoomManager:
 
     def _init_llm(self):
         """Initialize LLM client for text-mode queries."""
-        api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-        base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-        self._llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        from provider_config import LLM
+        api_key = LLM.api_key
+        base_url = LLM.base_url
+        self._llm_model = LLM.model
 
         if api_key:
             self._llm_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -879,9 +882,9 @@ class RoomManager:
         messages.append({"role": "user", "content": question})
 
         try:
-            # Only send chat_template_kwargs to vLLM (not real OpenAI)
-            _llm_base = os.getenv("LLM_BASE_URL", "")
-            _extra_body = {} if "api.openai.com" in _llm_base else {"chat_template_kwargs": {"enable_thinking": False}}
+            # Only send chat_template_kwargs to vLLM endpoints
+            from provider_config import LLM as _llm_cfg
+            _extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if _llm_cfg.is_vllm else {}
             stream = await asyncio.wait_for(
                 self._llm_client.chat.completions.create(
                     model=self._llm_model,

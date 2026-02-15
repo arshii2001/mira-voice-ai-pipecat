@@ -248,8 +248,9 @@ async def chat_completion(req: ChatRequest):
             t_first_token = 0.0
             token_count = 0
             async with httpx.AsyncClient(timeout=60.0) as client:
+                from provider_config import LLM as _llm_cfg
                 _json_body = {"model": model, "messages": messages, "stream": True}
-                if "api.openai.com" not in base_url:
+                if _llm_cfg.is_vllm:
                     _json_body["chat_template_kwargs"] = {"enable_thinking": False}
                 async with client.stream(
                     "POST",
@@ -290,8 +291,9 @@ async def chat_completion(req: ChatRequest):
     else:
         t0 = time.time()
         async with httpx.AsyncClient(timeout=60.0) as client:
+            from provider_config import LLM as _llm_cfg
             _json_body_ns = {"model": model, "messages": messages, "stream": False}
-            if "api.openai.com" not in base_url:
+            if _llm_cfg.is_vllm:
                 _json_body_ns["chat_template_kwargs"] = {"enable_thinking": False}
             resp = await client.post(
                 f"{base_url}/chat/completions",

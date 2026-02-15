@@ -6,7 +6,9 @@
 # ============================================================
 
 ---
-# ── Pipecat v2 ConfigMap (non-sensitive overrides) ───────────
+# ── Pipecat v2 ConfigMap (selectors only) ────────────────────
+# Provider endpoints and keys come from shared mira-provider-config/secrets.
+# Only the PROVIDER selectors differ between deployments.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,17 +17,10 @@ metadata:
   labels:
     app: pipecat-v2
 data:
+  # ── Provider selectors (change these + restart to switch) ──
   STT_PROVIDER: "soniox"
-  STT_LANGUAGE_HINTS: "en,hi,ta"
+  LLM_PROVIDER: "groq"
   TTS_PROVIDER: "elevenlabs"
-  LLM_PROVIDER: "openai"
-  LLM_BASE_URL: "https://api.openai.com/v1"
-  LLM_MODEL: "gpt-4o-mini"
-  HOST: "0.0.0.0"
-  PORT: "7860"
-  LOG_LEVEL: "INFO"
-  PROMPT_VERSION: "v4"
-  CURRICULUM_CONTEXT_MAX_TOKENS: "600"
 
 ---
 # ── OpenWebUI v2 ConfigMap ───────────────────────────────────
@@ -138,74 +133,23 @@ spec:
             - containerPort: 7860
               name: http
               protocol: TCP
+          envFrom:
+            # Shared provider config (all endpoints + common settings)
+            - configMapRef:
+                name: mira-provider-config
+            # Shared provider secrets (all API keys)
+            - secretRef:
+                name: mira-provider-secrets
+            # Per-deployment selectors (STT_PROVIDER, LLM_PROVIDER, TTS_PROVIDER)
+            - configMapRef:
+                name: pipecat-v2-config
           env:
-            - name: STT_PROVIDER
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: STT_PROVIDER
-            - name: STT_LANGUAGE_HINTS
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: STT_LANGUAGE_HINTS
-            - name: TTS_PROVIDER
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: TTS_PROVIDER
-            - name: LLM_PROVIDER
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: LLM_PROVIDER
-            - name: LLM_BASE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: LLM_BASE_URL
-            - name: LLM_MODEL
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: LLM_MODEL
-            - name: HOST
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: HOST
-            - name: PORT
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: PORT
-            - name: LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: LOG_LEVEL
-            - name: PROMPT_VERSION
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: PROMPT_VERSION
-            - name: CURRICULUM_CONTEXT_MAX_TOKENS
-              valueFrom:
-                configMapKeyRef:
-                  name: pipecat-v2-config
-                  key: CURRICULUM_CONTEXT_MAX_TOKENS
-            # ── Shared JWT secret with OpenWebUI ──
+            # Shared JWT secret with OpenWebUI
             - name: WEBUI_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: mira-shared-secrets
                   key: WEBUI_SECRET_KEY
-            # ── STT API key (Soniox) ──
-            - name: SONIOX_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: pipecat-v2-secrets
-                  key: SONIOX_API_KEY
             # ── Paths pointing into the PVC ──
             - name: PROMPT_DIR
               value: /pipecat-data/prompts

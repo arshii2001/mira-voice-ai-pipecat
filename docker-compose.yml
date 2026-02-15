@@ -118,16 +118,8 @@ services:
       - CURRICULUM_DIR=/content/curriculum
       - CURRICULUM_CONTEXT_MAX_TOKENS=600
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
-      # ── Override TTS to Svara (matches K8s OSS deployment) ──
-      - TTS_PROVIDER=svara
-      - TTS_WS_URL=ws://vllm-svara-ext.bbf23a-prod-cw-1.coreweave.app/v1/audio/text-to-speech/stream
-      - TTS_WS_API_KEY=${TTS_WS_API_KEY:-}
-      - TTS_SAMPLE_RATE=24000
-      - DEFAULT_VOICE=en_female
-      # ── LLM same as ElevenLabs stack ──
-      - LLM_PROVIDER=openai
-      - LLM_BASE_URL=https://api.openai.com/v1
-      - LLM_MODEL=gpt-4o-mini
+      # ── Provider selectors come from .env via env_file above ──
+      # To override: LLM_PROVIDER=groq docker compose up -d mira-voice-svara
     volumes:
       - ./prompts:/app/prompts:ro
       - classroom-data-svara:/app/data

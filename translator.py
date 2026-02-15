@@ -47,10 +47,12 @@ class Translator:
         api_key: str,
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o-mini",
+        is_vllm: bool = False,
     ):
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._base_url = base_url
+        self._is_vllm = is_vllm
 
         # Session-level metrics
         self._call_count: int = 0
@@ -96,7 +98,7 @@ class Translator:
                 ],
                 max_tokens=500,
                 temperature=0.3,  # Low temperature for faithful translation
-                **({"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}} if "api.openai.com" not in self._base_url else {}),
+                **({"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}} if self._is_vllm else {}),
             )
 
             latency_ms = round((time.monotonic() - t0) * 1000, 1)

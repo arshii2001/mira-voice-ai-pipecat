@@ -1239,34 +1239,42 @@ class GreetingProcessor(FrameProcessor):
 
 # ─────────────────────────────────────────────────────────────────────
 # Environment configuration — ALL provider settings are env-var driven.
-# Change provider by setting the env var; no code changes needed.
+# Change provider by setting the selector env var; no code changes needed.
+#
+# See provider_config.py for the multi-provider resolver.
+# To switch LLM:  set LLM_PROVIDER=groq  (or openai, vllm)
+# To switch TTS:  set TTS_PROVIDER=svara  (or elevenlabs, openai)
+# To switch STT:  set STT_PROVIDER=soniox (or deepgram, whisper)
+# All keys for all providers live in the env permanently.
 # ─────────────────────────────────────────────────────────────────────
 
-# --- LLM ---
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")       # "openai" (or any OpenAI-compatible)
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://vllm-gpt-oss-120b/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "DUMMY_KEY")
+from provider_config import LLM, TTS, STT
 
-# --- STT ---
-STT_PROVIDER = os.getenv("STT_PROVIDER", "soniox")       # "soniox" | "deepgram" | "whisper"
-SONIOX_API_KEY = os.getenv("SONIOX_API_KEY", "")
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
-STT_LANGUAGE_HINTS = os.getenv("STT_LANGUAGE_HINTS", "en,hi,ta")  # Comma-separated
-STT_SAMPLE_RATE = int(os.getenv("STT_SAMPLE_RATE", "16000"))
+# --- LLM (resolved from LLM_PROVIDER) ---
+LLM_PROVIDER = LLM.provider
+LLM_BASE_URL = LLM.base_url
+LLM_MODEL = LLM.model
+LLM_API_KEY = LLM.api_key
 
-# --- TTS ---
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")    # "elevenlabs" | "svara" | "openai"
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-TTS_VOICE_GENDER = os.getenv("TTS_VOICE_GENDER", "female")  # "female" | "male"
-TTS_WS_URL = os.getenv("TTS_WS_URL", "ws://svara-tts/v1/audio/text-to-speech/stream")
-TTS_WS_API_KEY = os.getenv("TTS_WS_API_KEY", "")          # API key for Svara TTS auth
-TTS_MAX_TOKENS = int(os.getenv("TTS_MAX_TOKENS", "4500"))   # Max tokens per Svara TTS request (text is chunked by sentence)
-TTS_SAMPLE_RATE = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
-OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova")  # For OpenAI TTS provider
+# --- STT (resolved from STT_PROVIDER) ---
+STT_PROVIDER = STT.provider
+SONIOX_API_KEY = STT.soniox_api_key
+DEEPGRAM_API_KEY = STT.deepgram_api_key
+STT_LANGUAGE_HINTS = STT.language_hints
+STT_SAMPLE_RATE = STT.sample_rate
+
+# --- TTS (resolved from TTS_PROVIDER) ---
+TTS_PROVIDER = TTS.provider
+ELEVENLABS_API_KEY = TTS.elevenlabs_api_key
+TTS_VOICE_GENDER = TTS.elevenlabs_voice_gender
+TTS_WS_URL = TTS.svara_ws_url
+TTS_WS_API_KEY = TTS.svara_api_key
+TTS_MAX_TOKENS = TTS.svara_max_tokens
+TTS_SAMPLE_RATE = TTS.sample_rate
+OPENAI_TTS_VOICE = TTS.openai_tts_voice
 
 # --- Voice ---
-DEFAULT_VOICE = os.getenv("DEFAULT_VOICE", "en_female")   # Default voice for Svara TTS
+DEFAULT_VOICE = TTS.svara_voice
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto")
 
 # VAD params as env vars for tuning without code change
@@ -1462,23 +1470,26 @@ def create_llm_service():
     Create an LLM service based on LLM_PROVIDER env var.
 
     Supported providers:
-      - "openai" (default) — OpenAI-compatible (works with vLLM, Azure, etc.)
+      - "openai" (default) — OpenAI native
+      - "groq"             — Groq cloud (OpenAI-compatible)
+      - "vllm"             — Self-hosted vLLM (OpenAI-compatible)
 
     Any provider that exposes an OpenAI-compatible /v1/chat/completions
-    endpoint works by setting LLM_BASE_URL and LLM_API_KEY.
+    endpoint works — the resolver in provider_config.py maps the provider
+    name to the correct base_url, model, and api_key.
 
     Returns an LLM service with a chat completions interface.
     """
     provider = LLM_PROVIDER.lower()
 
-    if provider == "openai":
-        logger.info(f"Creating LLM service: OpenAI-compatible (model={LLM_MODEL}, base_url={LLM_BASE_URL})")
-        # Only send chat_template_kwargs to vLLM endpoints (not real OpenAI).
+    # All supported providers use the OpenAI-compatible API
+    if provider in ("openai", "groq", "vllm"):
+        logger.info(f"Creating LLM service: {provider} (model={LLM_MODEL}, base_url={LLM_BASE_URL})")
+        # Only send chat_template_kwargs to vLLM endpoints.
         # vLLM reasoning models need enable_thinking=False to avoid burning tokens
         # on reasoning_content before producing actual content tokens.
-        is_openai_native = "api.openai.com" in LLM_BASE_URL
         extra = {}
-        if not is_openai_native:
+        if LLM.is_vllm:
             extra = {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
         llm_params = OpenAILLMService.InputParams(extra=extra)
         return OpenAILLMService(
@@ -1491,7 +1502,7 @@ def create_llm_service():
     else:
         raise ValueError(
             f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: openai (covers vLLM, Azure, OpenRouter, etc.)"
+            f"Supported: openai, groq, vllm"
         )
 
 
