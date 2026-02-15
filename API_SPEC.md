@@ -210,9 +210,15 @@ Sent when the LLM response is complete. Use to finalize the displayed text.
 ```json
 {
   "type": "bot_text_complete",
-  "text": "Hello! How can I help you today?"
+  "text": "Hello! How can I help you today?",
+  "interrupted": false
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `text` | string | The full response text |
+| `interrupted` | boolean | `true` if the response was cut short by user barge-in. `false` for normal completions. When `interrupted: true`, the frontend should keep the partial text visible (e.g. grayed out) rather than replacing it when the next response arrives. |
 
 > **Note:** `bot_text_complete` is also sent for the initial greeting immediately on connection.
 

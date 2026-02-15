@@ -851,6 +851,14 @@ class RoomManager:
                     f"[CLASSROOM] Speaker language updated in text mode: "
                     f"{registered_lang} → {detected_lang} (detected from question text)"
                 )
+                # Trim history to reduce language contamination (same as voice path)
+                old_len = len(room.conversation_history)
+                if old_len > 4:
+                    room.conversation_history = room.conversation_history[-4:]
+                    logger.info(
+                        f"[CLASSROOM] Trimmed conversation history on language switch: "
+                        f"{old_len} → {len(room.conversation_history)} messages"
+                    )
 
         # ── CRITICAL: Ensure language tag is always present ──
         # The voice pipeline (SonioxSTT) adds [User is speaking X] tags,
@@ -987,6 +995,7 @@ class RoomManager:
                 await speaker_ws.send_json({
                     "type": "bot_text_complete",
                     "text": full_response,
+                    "interrupted": False,
                 })
             except Exception:
                 pass
@@ -2439,10 +2448,36 @@ class ClassroomBroadcaster(FrameProcessor):
                         f"{old_lang} → {self._last_user_lang} (detected by STT)"
                     )
 
+                    # ── Trim conversation history on language switch ──
+                    # When a speaker switches language, the old history
+                    # (heavily in the previous language) overwhelms the
+                    # [User is speaking X] tag, causing the LLM to produce
+                    # mixed-language or transliterated responses.
+                    # Keep only the last 4 messages to preserve minimal
+                    # context while reducing language contamination.
+                    old_len = len(self._room.conversation_history)
+                    if old_len > 4:
+                        self._room.conversation_history = self._room.conversation_history[-4:]
+                        logger.info(
+                            f"[CLASSROOM] Trimmed conversation history on language switch: "
+                            f"{old_len} → {len(self._room.conversation_history)} messages"
+                        )
+
             logger.info(
                 f"[METRICS][CLASSROOM] stt_received | turn={self._turn_count} | "
                 f"lang={self._last_user_lang} | text='{frame.text[:50]}'"
             )
+
+            # ── Inject dynamic language instruction ──
+            # In the voice pipeline, the system prompt is set once at pipeline
+            # creation and has no _response_language_instruction(). The only
+            # language signal is the [User is speaking X] tag from Soniox STT.
+            # When conversation history is heavily in another language, the tag
+            # alone isn't strong enough. Inject a reinforcing instruction into
+            # the transcription text so the LLM sees it immediately before the
+            # user's message — this matches what ask_llm does with a system msg.
+            lang_instruction = _response_language_instruction(self._last_user_lang)
+            frame.text = f"[{lang_instruction}] {frame.text}"
 
             # Prepend speaker name so the LLM knows who asked
             speaker_name = None

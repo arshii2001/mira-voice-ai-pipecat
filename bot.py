@@ -703,6 +703,7 @@ class TextStreamForwarder(FrameProcessor):
                     await self._websocket.send_json({
                         "type": "bot_text_complete",
                         "text": self._current_response,
+                        "interrupted": False,
                     })
                     logger.info(f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'")
                 except Exception as e:
@@ -775,6 +776,7 @@ class TextAudioSyncNotifier(FrameProcessor):
                 await fwd._websocket.send_json({
                     "type": "bot_text_complete",
                     "text": fwd._current_response,
+                    "interrupted": False,
                 })
                 logger.info(
                     f"[TEXT_SYNC] Complete response (after TTS): "
@@ -837,7 +839,10 @@ class TextAudioSyncNotifier(FrameProcessor):
             await self._send_complete_if_done()
 
         elif isinstance(frame, StartInterruptionFrame):
-            # On barge-in, reset in-flight counter and flush text
+            # On barge-in, reset in-flight counter and flush text.
+            # Send bot_text_complete with interrupted=true so the frontend
+            # can keep the partial response visible (e.g. grayed out)
+            # instead of silently replacing it when the new response arrives.
             self._tts_in_flight = 0
             fwd = self._text_forwarder
             await fwd.flush_all_queued()
@@ -846,7 +851,13 @@ class TextAudioSyncNotifier(FrameProcessor):
                     await fwd._websocket.send_json({
                         "type": "bot_text_complete",
                         "text": fwd._current_response,
+                        "interrupted": True,
                     })
+                    logger.info(
+                        f"[TEXT_SYNC] Interrupted response sent "
+                        f"({len(fwd._current_response)} chars): "
+                        f"'{fwd._current_response[:80]}...'"
+                    )
                 except Exception:
                     pass
                 fwd._current_response = ""
