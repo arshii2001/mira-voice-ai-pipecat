@@ -38,7 +38,7 @@ metadata:
     app: openwebui-v2
 data:
   PIPECAT_ENABLED: "true"
-  PIPECAT_API_URL: "https://pipecat-v2-api.taile994c5.ts.net"
+  PIPECAT_API_URL: "https://mira-ai.westus2.cloudapp.azure.com/pipecat"
   PIPECAT_CONNECTION_MODE: "websocket"
   WEBUI_AUTH: "true"
   ENABLE_SIGNUP: "false"
