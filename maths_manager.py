@@ -121,14 +121,9 @@ class MathsManager:
         if objective:
             lines.append(f"Learning Objectives: {objective}")
             
-        qas = topic.get('sample_qas', [])
-        if qas:
-            lines.append("\nSample Questions & Answers:")
-            for qa in qas:
-                q = qa.get('question', '').strip()
-                a = qa.get('answer', '').strip()
-                if q and a and "<Sample Question" not in q: # Filter placeholders if any
-                    lines.append(f"Q: {q}\nA: {a}")
+        reasoning = topic.get('reasoning')
+        if reasoning:
+            lines.append(f"\nTeaching Strategy:\n{reasoning}")
         
         return "\n".join(lines)
 
