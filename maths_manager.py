@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Default path relative to this file or from env
 CURRICULUM_DIR = os.environ.get("CURRICULUM_DIR", "/content/curriculum")
-DEFAULT_MATHS_FILE = os.path.join(CURRICULUM_DIR, "3_counting.json")
+DEFAULT_MATHS_FILE = os.path.join(CURRICULUM_DIR, "3_counting_final.json")
 
 class MathsManager:
     def __init__(self, json_path: Optional[str] = None):
