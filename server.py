@@ -51,6 +51,7 @@ from bot import (
 )
 from services.elevenlabs_tts import VOICE_PRESETS
 from classroom import router as classroom_router, room_manager, ClassroomBroadcaster, _metrics_collector
+from maths_manager import get_maths_manager
 
 # Configure logging
 logging.basicConfig(
@@ -215,7 +216,14 @@ async def chat_completion(req: ChatRequest):
     model = req.model or LLM_MODEL
 
     # System prompt for Mira text tutor mode (composed from versioned files)
-    prompt_content = load_system_prompt(version=PROMPT_VERSION, mode="text")
+    prompt_mode = "text"
+    if req.topic:
+        mm = get_maths_manager()
+        # If topic exists in Maths manager, switch to math-word-problems mode prompt
+        if mm.get_topic(str(req.topic)):
+            prompt_mode = "math-word-problems"
+            
+    prompt_content = load_system_prompt(version=PROMPT_VERSION, mode=prompt_mode)
 
     # Inject dynamic student context if available
     context_lines = []
@@ -226,14 +234,24 @@ async def chat_completion(req: ChatRequest):
     if context_lines:
         prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
 
-    # Inject curriculum context if topic matches loaded curriculum
+    # Inject curriculum context (Science)
     if req.topic:
         from curriculum_manager import get_curriculum_manager
         cm = get_curriculum_manager()
+        # Try Science curriculum first
+        # Try Science curriculum first
+        curriculum_ctx = None
         if cm.available:
             curriculum_ctx = cm.get_context_for_topic(req.topic)
-            if curriculum_ctx:
-                prompt_content += "\n\n--- CURRICULUM CONTEXT ---\n" + curriculum_ctx + "\n"
+        
+        if curriculum_ctx:
+            prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
+        else:
+            # Try Maths curriculum if Science yield no results
+            mm = get_maths_manager()
+            maths_ctx = mm.get_context_for_topic(str(req.topic))
+            if maths_ctx:
+                prompt_content += "\n\n--- CURRICULUM CONTEXT (MATHS) ---\n" + maths_ctx + "\n"
 
     system_msg = {
         "role": "system",
@@ -739,6 +757,33 @@ async def list_languages():
         {"code": "ta", "name": "Tamil"},
     ]
     return {"languages": languages}
+
+
+# ── Maths Curriculum Endpoints ─────────────────────────────────────
+
+@app.get("/maths/grades", dependencies=[Depends(_require_jwt)])
+async def list_maths_grades():
+    """List available grades for Maths curriculum."""
+    mm = get_maths_manager()
+    return {"grades": mm.get_grades()}
+
+
+@app.get("/maths/topics/{grade}", dependencies=[Depends(_require_jwt)])
+async def list_maths_topics(grade: int):
+    """List topics for a specific grade in Maths curriculum."""
+    mm = get_maths_manager()
+    topics = mm.get_topics_for_grade(grade)
+    return {"topics": topics}
+
+
+@app.get("/maths/context/{topic_id}", dependencies=[Depends(_require_jwt)])
+async def get_maths_context(topic_id: str):
+    """Get full context for a specific Maths topic."""
+    mm = get_maths_manager()
+    context = mm.get_context_for_topic(topic_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    return {"context": context}
 
 
 def run_server():
