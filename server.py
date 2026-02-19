@@ -251,7 +251,7 @@ async def chat_completion(req: ChatRequest):
             mm = get_maths_manager()
             maths_ctx = mm.get_context_for_topic(str(req.topic))
             if maths_ctx:
-                prompt_content += "\n\n--- CURRICULUM CONTEXT (MATHS) ---\n" + maths_ctx + "\n"
+                prompt_content += "\n\n" + maths_ctx + "\n"
 
     system_msg = {
         "role": "system",

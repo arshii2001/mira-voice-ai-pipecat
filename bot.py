@@ -1316,7 +1316,11 @@ def load_system_prompt(version: str = PROMPT_VERSION, mode: str = "voice") -> st
         mode: One of "voice", "classroom", "text". Only used for v4+.
     """
     if version.startswith("v4"):
-        base = _load_prompt_file(f"{version}-base.md")
+        base_filename = f"{version}-base.md"
+        if mode == "math-word-problems":
+            base_filename = f"{version}-base-math.md"
+
+        base = _load_prompt_file(base_filename)
         mode_prompt = _load_prompt_file(f"{version}-{mode}.md")
         if base and mode_prompt:
             return base + "\n\n" + mode_prompt

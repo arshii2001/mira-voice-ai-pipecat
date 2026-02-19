@@ -82,7 +82,7 @@ class STTConfig:
 # Provider presets: (env_prefix, default_base_url, default_model, is_vllm)
 _LLM_PRESETS = {
     "openai": ("OPENAI", "https://api.openai.com/v1", "gpt-4o-mini", False),
-    "groq":   ("GROQ",   "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", False),
+    "groq":   ("GROQ",   "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", False),
     "vllm":   ("VLLM",   "http://vllm-gpt-oss-120b/v1", "openai/gpt-oss-120b", True),
 }
 

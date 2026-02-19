@@ -110,6 +110,7 @@ class MathsManager:
             return None
 
         lines = []
+        lines.append("--- CURRICULUM CONTEXT (MATHS) ---")
         lines.append(f"Subject: Mathematics (Grade {topic.get('grade')})")
         lines.append(f"Topic: {topic.get('improved_topic_name', topic.get('original_topic'))}")
         
