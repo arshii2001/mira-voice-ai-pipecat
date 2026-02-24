@@ -26,7 +26,7 @@ RUN chmod +x /docker-entrypoint.sh
 
 # Copy .env file for default environment variables
 # These can be overridden at runtime with: docker run -e VAR=value
-COPY .env /app/.env
+
 
 # Expose port
 EXPOSE 7860
