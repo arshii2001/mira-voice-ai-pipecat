@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 # These are high-quality multilingual voices suitable for Indian language support
 VOICE_PRESETS = {
     "female": {
-        "id": "2zRM7PkgwBPiau2jvVXc",
-        "name": "Monika Sogam - Deep & Natural",
+        "id": "21m00Tcm4TlvDq8ikWAM",
+        "name": "Rachel - Calm & Clear",
     },
     "male": {
-        "id": "siw1N9V8LmYeEWKyWBxv",
-        "name": "Ruhaan - Clear, Loud, & Cheerful",
+        "id": "29vD33N1CtxCmqQRPOHJ",
+        "name": "Drew - News & Conversational",
     },
 }
 
@@ -41,7 +41,7 @@ def create_elevenlabs_tts(
     voice_id: Optional[str] = None,
     model: str = DEFAULT_MODEL,
     sample_rate: int = 24000,
-    **kwargs
+    **kwargs,
 ) -> ElevenLabsTTSService:
     """
     Create an ElevenLabs TTS service with preset configuration.
@@ -72,7 +72,9 @@ def create_elevenlabs_tts(
         selected_voice_id = voice_preset["id"]
         voice_name = voice_preset["name"]
 
-    logger.info(f"Creating ElevenLabs TTS: voice={voice_name} ({selected_voice_id}), model={model}")
+    logger.info(
+        f"Creating ElevenLabs TTS: voice={voice_name} ({selected_voice_id}), model={model}"
+    )
 
     # Voice settings to prevent high-pitch first syllable and ensure consistent prosody.
     # - stability=0.6: Higher stability = more consistent pitch across chunks (reduces first-syllable spike)
@@ -86,7 +88,9 @@ def create_elevenlabs_tts(
         use_speaker_boost=True,
     )
 
-    logger.info(f"ElevenLabs voice params: stability={params.stability}, similarity={params.similarity_boost}, style={params.style}")
+    logger.info(
+        f"ElevenLabs voice params: stability={params.stability}, similarity={params.similarity_boost}, style={params.style}"
+    )
 
     # Create and return the service
     return ElevenLabsTTSService(
@@ -95,7 +99,7 @@ def create_elevenlabs_tts(
         model=model,
         sample_rate=sample_rate,
         params=params,
-        **kwargs
+        **kwargs,
     )
 
 

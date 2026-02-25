@@ -62,7 +62,9 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.audio.interruptions.min_words_interruption_strategy import MinWordsInterruptionStrategy
+from pipecat.audio.interruptions.min_words_interruption_strategy import (
+    MinWordsInterruptionStrategy,
+)
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -76,7 +78,7 @@ from services.elevenlabs_tts import create_elevenlabs_tts
 # Control verbosity via LOG_LEVEL env var: DEBUG, INFO (default), WARNING, ERROR
 logging.basicConfig(
     level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -91,6 +93,7 @@ class VoiceStateManager:
 
     def __init__(self, initial_gender: str = "female"):
         from services.elevenlabs_tts import VOICE_PRESETS
+
         self._voice_ids = {g: p["id"] for g, p in VOICE_PRESETS.items()}
         self._current_gender = initial_gender
 
@@ -105,7 +108,9 @@ class VoiceStateManager:
     def switch_voice(self, mode: str) -> tuple[str, str]:
         """Switch voice based on mode. Returns (new_gender, new_voice_id)."""
         if mode == "switch":
-            self._current_gender = "male" if self._current_gender == "female" else "female"
+            self._current_gender = (
+                "male" if self._current_gender == "female" else "female"
+            )
         elif mode in self._voice_ids:
             self._current_gender = mode
         return self._current_gender, self.current_voice_id
@@ -118,10 +123,10 @@ SELECT_VOICE_SCHEMA = FunctionSchema(
         "mode": {
             "type": "string",
             "enum": ["switch", "male", "female"],
-            "description": "The voice selection mode: 'switch' to toggle current voice, 'male' to use male voice, 'female' to use female voice"
+            "description": "The voice selection mode: 'switch' to toggle current voice, 'male' to use male voice, 'female' to use female voice",
         }
     },
-    required=["mode"]
+    required=["mode"],
 )
 
 
@@ -143,8 +148,13 @@ class PipelineInstrumentor(FrameProcessor):
     Logs are prefixed with [METRICS] for easy grep/filtering.
     """
 
-    def __init__(self, name: str = "PipelineInstrumentor",
-                 metrics_collector=None, is_classroom: bool = False, **kwargs):
+    def __init__(
+        self,
+        name: str = "PipelineInstrumentor",
+        metrics_collector=None,
+        is_classroom: bool = False,
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
         self._turn_count = 0
         self._llm_buffer = ""
@@ -202,22 +212,32 @@ class PipelineInstrumentor(FrameProcessor):
 
     def _log_turn_summary(self):
         """Log a comprehensive summary of the completed turn."""
-        user_speech_ms = self._ms(self._user_started_speaking_at, self._user_stopped_speaking_at)
+        user_speech_ms = self._ms(
+            self._user_started_speaking_at, self._user_stopped_speaking_at
+        )
         vad_to_stt_ms = self._ms(self._user_stopped_speaking_at, self._stt_final_at)
         stt_to_llm_ms = self._ms(self._stt_final_at, self._llm_first_token_at)
         llm_ttft_ms = self._ms(self._user_stopped_speaking_at, self._llm_first_token_at)
-        llm_generation_ms = self._ms(self._llm_response_start_at, self._llm_response_end_at)
+        llm_generation_ms = self._ms(
+            self._llm_response_start_at, self._llm_response_end_at
+        )
         llm_to_tts_ms = self._ms(self._llm_first_token_at, self._tts_started_at)
         tts_duration_ms = self._ms(self._tts_started_at, self._tts_stopped_at)
-        bot_speaking_ms = self._ms(self._bot_started_speaking_at, self._bot_stopped_speaking_at)
-        full_turn_latency_ms = self._ms(self._user_stopped_speaking_at, self._first_audio_out_at)
+        bot_speaking_ms = self._ms(
+            self._bot_started_speaking_at, self._bot_stopped_speaking_at
+        )
+        full_turn_latency_ms = self._ms(
+            self._user_stopped_speaking_at, self._first_audio_out_at
+        )
 
         if full_turn_latency_ms > 0:
             self._turn_latencies.append(full_turn_latency_ms)
 
         avg_turn_latency = 0.0
         if self._turn_latencies:
-            avg_turn_latency = round(sum(self._turn_latencies) / len(self._turn_latencies), 1)
+            avg_turn_latency = round(
+                sum(self._turn_latencies) / len(self._turn_latencies), 1
+            )
 
         mode_label = "CLASSROOM" if self._is_classroom else "TUTOR"
         logger.info(f"")
@@ -227,14 +247,24 @@ class PipelineInstrumentor(FrameProcessor):
         logger.info(f"[METRICS]   User speech duration:    {user_speech_ms:>8.1f} ms")
         logger.info(f"[METRICS]   VAD→STT (transcribe):    {vad_to_stt_ms:>8.1f} ms")
         logger.info(f"[METRICS]   STT→LLM (first token):   {stt_to_llm_ms:>8.1f} ms")
-        logger.info(f"[METRICS]   LLM generation total:     {llm_generation_ms:>8.1f} ms  ({self._llm_token_count} tokens)")
+        logger.info(
+            f"[METRICS]   LLM generation total:     {llm_generation_ms:>8.1f} ms  ({self._llm_token_count} tokens)"
+        )
         logger.info(f"[METRICS]   LLM→TTS (first chunk):    {llm_to_tts_ms:>8.1f} ms")
-        logger.info(f"[METRICS]   TTS duration:             {tts_duration_ms:>8.1f} ms  ({self._tts_audio_chunks} chunks, {self._tts_audio_bytes} bytes)")
+        logger.info(
+            f"[METRICS]   TTS duration:             {tts_duration_ms:>8.1f} ms  ({self._tts_audio_chunks} chunks, {self._tts_audio_bytes} bytes)"
+        )
         logger.info(f"[METRICS]   Bot speaking duration:    {bot_speaking_ms:>8.1f} ms")
-        logger.info(f"[METRICS]   ★ FULL TURN LATENCY:      {full_turn_latency_ms:>8.1f} ms  (user-stop → first-audio)")
-        logger.info(f"[METRICS]   Session avg turn latency: {avg_turn_latency:>8.1f} ms  ({len(self._turn_latencies)} turns)")
+        logger.info(
+            f"[METRICS]   ★ FULL TURN LATENCY:      {full_turn_latency_ms:>8.1f} ms  (user-stop → first-audio)"
+        )
+        logger.info(
+            f"[METRICS]   Session avg turn latency: {avg_turn_latency:>8.1f} ms  ({len(self._turn_latencies)} turns)"
+        )
         logger.info(f"[METRICS]   Barge-ins this session:   {self._barge_in_count}")
-        logger.info(f"[METRICS]   Bot response: '{self._llm_buffer[:120]}{'...' if len(self._llm_buffer) > 120 else ''}'")
+        logger.info(
+            f"[METRICS]   Bot response: '{self._llm_buffer[:120]}{'...' if len(self._llm_buffer) > 120 else ''}'"
+        )
         logger.info(f"{'─' * 70}")
         logger.info(f"")
 
@@ -252,24 +282,32 @@ class PipelineInstrumentor(FrameProcessor):
                 is_classroom=self._is_classroom,
             )
             # Per-call trace for voice pipeline
-            self._metrics_collector.record_trace({
-                "mode": "classroom_voice" if self._is_classroom else "tutor_voice",
-                "query": self._llm_buffer[:80],
-                "ts": self._user_stopped_speaking_at or time.time(),
-                "total_ms": full_turn_latency_ms,
-                "stages": [
-                    {"name": "user_speech", "ms": user_speech_ms},
-                    {"name": "vad_to_stt", "ms": vad_to_stt_ms},
-                    {"name": "stt_to_llm_ttft", "ms": stt_to_llm_ms},
-                    {"name": "llm_generation", "ms": llm_generation_ms,
-                     "tokens": self._llm_token_count},
-                    {"name": "llm_to_tts", "ms": llm_to_tts_ms},
-                    {"name": "tts", "ms": tts_duration_ms,
-                     "chunks": self._tts_audio_chunks,
-                     "audio_bytes": self._tts_audio_bytes},
-                    {"name": "bot_speaking", "ms": bot_speaking_ms},
-                ],
-            })
+            self._metrics_collector.record_trace(
+                {
+                    "mode": "classroom_voice" if self._is_classroom else "tutor_voice",
+                    "query": self._llm_buffer[:80],
+                    "ts": self._user_stopped_speaking_at or time.time(),
+                    "total_ms": full_turn_latency_ms,
+                    "stages": [
+                        {"name": "user_speech", "ms": user_speech_ms},
+                        {"name": "vad_to_stt", "ms": vad_to_stt_ms},
+                        {"name": "stt_to_llm_ttft", "ms": stt_to_llm_ms},
+                        {
+                            "name": "llm_generation",
+                            "ms": llm_generation_ms,
+                            "tokens": self._llm_token_count,
+                        },
+                        {"name": "llm_to_tts", "ms": llm_to_tts_ms},
+                        {
+                            "name": "tts",
+                            "ms": tts_duration_ms,
+                            "chunks": self._tts_audio_chunks,
+                            "audio_bytes": self._tts_audio_bytes,
+                        },
+                        {"name": "bot_speaking", "ms": bot_speaking_ms},
+                    ],
+                }
+            )
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -289,7 +327,9 @@ class PipelineInstrumentor(FrameProcessor):
             self._user_stopped_speaking_at = now
             speech_dur = self._ms(self._user_started_speaking_at, now)
             logger.info(f"{'=' * 60}")
-            logger.info(f"[METRICS] >>> VAD: USER STOPPED SPEAKING <<<  duration={speech_dur:.0f}ms")
+            logger.info(
+                f"[METRICS] >>> VAD: USER STOPPED SPEAKING <<<  duration={speech_dur:.0f}ms"
+            )
             logger.info(f"{'=' * 60}")
 
         # STT: Final transcription
@@ -297,17 +337,23 @@ class PipelineInstrumentor(FrameProcessor):
             self._stt_final_at = now
             self._turn_count += 1
             stt_latency = self._ms(self._user_stopped_speaking_at, now)
-            logger.info(f"[METRICS] [TURN {self._turn_count}] STT FINAL: '{frame.text}'  (VAD→STT: {stt_latency:.0f}ms)")
+            logger.info(
+                f"[METRICS] [TURN {self._turn_count}] STT FINAL: '{frame.text}'  (VAD→STT: {stt_latency:.0f}ms)"
+            )
 
         # STT: Interim transcription
         elif isinstance(frame, InterimTranscriptionFrame):
             interim_latency = self._ms(self._user_started_speaking_at, now)
-            logger.debug(f"[METRICS] STT INTERIM: '{frame.text[:60]}...'  ({interim_latency:.0f}ms from speech start)")
+            logger.debug(
+                f"[METRICS] STT INTERIM: '{frame.text[:60]}...'  ({interim_latency:.0f}ms from speech start)"
+            )
 
         # LLM: Response stream start
         elif isinstance(frame, LLMFullResponseStartFrame):
             self._llm_response_start_at = now
-            logger.info(f"[METRICS] LLM response stream STARTED  (STT→LLM-start: {self._ms(self._stt_final_at, now):.0f}ms)")
+            logger.info(
+                f"[METRICS] LLM response stream STARTED  (STT→LLM-start: {self._ms(self._stt_final_at, now):.0f}ms)"
+            )
 
         # LLM: Text token
         elif isinstance(frame, TextFrame):
@@ -318,14 +364,18 @@ class PipelineInstrumentor(FrameProcessor):
             if self._llm_token_count == 1:
                 self._llm_first_token_at = now
                 ttft = self._ms(self._user_stopped_speaking_at, now)
-                logger.info(f"[METRICS] LLM FIRST TOKEN: '{frame.text}'  (TTFT from user-stop: {ttft:.0f}ms)")
+                logger.info(
+                    f"[METRICS] LLM FIRST TOKEN: '{frame.text}'  (TTFT from user-stop: {ttft:.0f}ms)"
+                )
 
         # LLM: Response stream end
         elif isinstance(frame, LLMFullResponseEndFrame):
             self._llm_response_end_at = now
             gen_ms = self._ms(self._llm_response_start_at, now)
             tps = self._llm_token_count / (gen_ms / 1000) if gen_ms > 0 else 0
-            logger.info(f"[METRICS] LLM response COMPLETE: {self._llm_token_count} tokens in {gen_ms:.0f}ms ({tps:.1f} tok/s)")
+            logger.info(
+                f"[METRICS] LLM response COMPLETE: {self._llm_token_count} tokens in {gen_ms:.0f}ms ({tps:.1f} tok/s)"
+            )
 
         # TTS: Started generating
         elif isinstance(frame, TTSStartedFrame):
@@ -339,20 +389,26 @@ class PipelineInstrumentor(FrameProcessor):
                     )
             self._tts_started_at = now
             llm_to_tts = self._ms(self._llm_first_token_at, now)
-            logger.info(f"[METRICS] TTS STARTED  (LLM-first-token → TTS-start: {llm_to_tts:.0f}ms)")
+            logger.info(
+                f"[METRICS] TTS STARTED  (LLM-first-token → TTS-start: {llm_to_tts:.0f}ms)"
+            )
 
         # TTS: Stopped generating
         elif isinstance(frame, TTSStoppedFrame):
             self._tts_stopped_at = now
             tts_dur = self._ms(self._tts_started_at, now)
-            logger.info(f"[METRICS] TTS STOPPED  duration={tts_dur:.0f}ms  chunks={self._tts_audio_chunks}  bytes={self._tts_audio_bytes}")
+            logger.info(
+                f"[METRICS] TTS STOPPED  duration={tts_dur:.0f}ms  chunks={self._tts_audio_chunks}  bytes={self._tts_audio_bytes}"
+            )
             self._log_turn_summary()
 
         # Bot started speaking (audio out)
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_started_speaking_at = now
             full_latency = self._ms(self._user_stopped_speaking_at, now)
-            logger.info(f"[METRICS] BOT STARTED SPEAKING  (user-stop → bot-speak: {full_latency:.0f}ms)")
+            logger.info(
+                f"[METRICS] BOT STARTED SPEAKING  (user-stop → bot-speak: {full_latency:.0f}ms)"
+            )
 
         # Bot stopped speaking
         elif isinstance(frame, BotStoppedSpeakingFrame):
@@ -363,18 +419,22 @@ class PipelineInstrumentor(FrameProcessor):
         # Audio output frame (for first-byte tracking)
         elif isinstance(frame, AudioRawFrame):
             self._tts_audio_chunks += 1
-            self._tts_audio_bytes += len(frame.audio) if hasattr(frame, 'audio') else 0
+            self._tts_audio_bytes += len(frame.audio) if hasattr(frame, "audio") else 0
 
             if self._tts_audio_chunks == 1:
                 self._first_audio_out_at = now
                 ttfb = self._ms(self._user_stopped_speaking_at, now)
-                logger.info(f"[METRICS] ★ FIRST AUDIO BYTE OUT  TTFB={ttfb:.0f}ms (user-stop → first-audio)")
+                logger.info(
+                    f"[METRICS] ★ FIRST AUDIO BYTE OUT  TTFB={ttfb:.0f}ms (user-stop → first-audio)"
+                )
 
         # Barge-in
         elif isinstance(frame, StartInterruptionFrame):
             self._barge_in_count += 1
             bot_interrupted_after = self._ms(self._bot_started_speaking_at, now)
-            logger.warning(f"[METRICS] ⚡ BARGE-IN #{self._barge_in_count}  (bot was speaking for {bot_interrupted_after:.0f}ms)")
+            logger.warning(
+                f"[METRICS] ⚡ BARGE-IN #{self._barge_in_count}  (bot was speaking for {bot_interrupted_after:.0f}ms)"
+            )
             self._llm_buffer = ""
 
         # Forward the frame downstream
@@ -382,7 +442,9 @@ class PipelineInstrumentor(FrameProcessor):
 
 
 # Regex to match [TEACHER_ACTION: ...] or [TUTOR_ACTION: ...] tags
-_ACTION_TAG_RE = re.compile(r'\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*', re.IGNORECASE)
+_ACTION_TAG_RE = re.compile(
+    r"\[(?:TEACHER_ACTION|TUTOR_ACTION):\s*[^\]]*\]\s*", re.IGNORECASE
+)
 
 
 class ActionTagFilter(FrameProcessor):
@@ -405,13 +467,17 @@ class ActionTagFilter(FrameProcessor):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TextFrame):
-            cleaned = _ACTION_TAG_RE.sub('', frame.text)
+            cleaned = _ACTION_TAG_RE.sub("", frame.text)
             if not cleaned.strip():
                 # Entire frame was just a tag — drop it
-                logger.debug(f"[ActionTagFilter] Dropped tag-only frame: '{frame.text}'")
+                logger.debug(
+                    f"[ActionTagFilter] Dropped tag-only frame: '{frame.text}'"
+                )
                 return
             if cleaned != frame.text:
-                logger.info(f"[ActionTagFilter] Stripped tags: '{frame.text}' -> '{cleaned}'")
+                logger.info(
+                    f"[ActionTagFilter] Stripped tags: '{frame.text}' -> '{cleaned}'"
+                )
                 frame.text = cleaned
         await self.push_frame(frame, direction)
 
@@ -448,19 +514,27 @@ class TextStreamForwarder(FrameProcessor):
     """
 
     # Sentence-ending punctuation (covers English, Hindi Devanagari, etc.)
-    _SENTENCE_ENDS = re.compile(r'[.!?।؟\n]\s*$')
+    _SENTENCE_ENDS = re.compile(r"[.!?।؟\n]\s*$")
 
     # How long to wait for TTS to start a sentence before sending text anyway
     _TTS_SENTENCE_TIMEOUT = 15.0  # seconds
 
-    def __init__(self, websocket, text_only: bool = False, name: str = "TextStreamForwarder", **kwargs):
+    def __init__(
+        self,
+        websocket,
+        text_only: bool = False,
+        name: str = "TextStreamForwarder",
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
         self._websocket = websocket
         self._text_only = text_only
         self._current_response = ""
-        self._sentence_buffer = ""        # Accumulates tokens until sentence boundary
+        self._sentence_buffer = ""  # Accumulates tokens until sentence boundary
         self._in_response = False
-        self._needs_space_before_next = False  # Ensure space between sentences for TTS aggregator
+        self._needs_space_before_next = (
+            False  # Ensure space between sentences for TTS aggregator
+        )
 
         # ── Per-receiver sentence queue (text_and_audio only) ──
         # Each sentence is a string.  The queue is consumed by
@@ -472,11 +546,15 @@ class TextStreamForwarder(FrameProcessor):
         self._watchdog_event = asyncio.Event()  # signalled when TTS releases a sentence
 
         # ── Metrics (per-response, reset on LLMFullResponseStartFrame) ──
-        self._metrics_sentences_queued: int = 0       # sentences enqueued this response
-        self._metrics_sentences_released: int = 0     # released by TTS (normal path)
-        self._metrics_sentences_timed_out: int = 0    # released by watchdog (TTS too slow)
-        self._metrics_sentences_flushed: int = 0      # flushed on end/interruption
-        self._metrics_response_start_at: float = 0.0  # time of LLMFullResponseStartFrame
+        self._metrics_sentences_queued: int = 0  # sentences enqueued this response
+        self._metrics_sentences_released: int = 0  # released by TTS (normal path)
+        self._metrics_sentences_timed_out: int = (
+            0  # released by watchdog (TTS too slow)
+        )
+        self._metrics_sentences_flushed: int = 0  # flushed on end/interruption
+        self._metrics_response_start_at: float = (
+            0.0  # time of LLMFullResponseStartFrame
+        )
         self._metrics_first_sentence_queued_at: float = 0.0
         self._metrics_first_sentence_released_at: float = 0.0
 
@@ -500,11 +578,23 @@ class TextStreamForwarder(FrameProcessor):
         total = self._metrics_sentences_queued
         if total == 0 and self._text_only:
             return  # text_only mode doesn't queue sentences
-        elapsed_ms = round((time.time() - self._metrics_response_start_at) * 1000, 1) if self._metrics_response_start_at else 0
+        elapsed_ms = (
+            round((time.time() - self._metrics_response_start_at) * 1000, 1)
+            if self._metrics_response_start_at
+            else 0
+        )
         queue_to_release_ms = 0.0
-        if self._metrics_first_sentence_queued_at and self._metrics_first_sentence_released_at:
+        if (
+            self._metrics_first_sentence_queued_at
+            and self._metrics_first_sentence_released_at
+        ):
             queue_to_release_ms = round(
-                (self._metrics_first_sentence_released_at - self._metrics_first_sentence_queued_at) * 1000, 1
+                (
+                    self._metrics_first_sentence_released_at
+                    - self._metrics_first_sentence_queued_at
+                )
+                * 1000,
+                1,
             )
         mode_label = "text_only" if self._text_only else "text_and_audio"
         logger.info(
@@ -535,11 +625,13 @@ class TextStreamForwarder(FrameProcessor):
     async def _send_sentence(self, text: str):
         """Send a single sentence to the client."""
         try:
-            await self._websocket.send_json({
-                "type": "bot_text",
-                "text": text,
-                "streaming": True,
-            })
+            await self._websocket.send_json(
+                {
+                    "type": "bot_text",
+                    "text": text,
+                    "streaming": True,
+                }
+            )
             logger.debug(f"[TEXT_STREAM] Released sentence: '{text[:80]}'")
         except Exception as e:
             logger.warning(f"[TEXT_STREAM] Failed to send sentence: {e}")
@@ -634,10 +726,12 @@ class TextStreamForwarder(FrameProcessor):
         elif isinstance(frame, TTSSpeakFrame):
             # Greeting / direct-speak frames — send as text immediately
             try:
-                await self._websocket.send_json({
-                    "type": "bot_text_complete",
-                    "text": frame.text,
-                })
+                await self._websocket.send_json(
+                    {
+                        "type": "bot_text_complete",
+                        "text": frame.text,
+                    }
+                )
                 logger.debug(f"[TEXT_STREAM] Greeting text sent: '{frame.text[:120]}'")
             except Exception as e:
                 logger.debug(f"[TEXT_STREAM] Failed to send greeting text: {e}")
@@ -656,7 +750,11 @@ class TextStreamForwarder(FrameProcessor):
             # LLM tokens like "Why" after "right?" may lack a leading space,
             # causing Pipecat's NLTK-based aggregator to merge "right?Why"
             # into one sentence instead of splitting at the "?".
-            if self._needs_space_before_next and token_text and not token_text[0].isspace():
+            if (
+                self._needs_space_before_next
+                and token_text
+                and not token_text[0].isspace()
+            ):
                 frame.text = " " + token_text
                 self._needs_space_before_next = False
             elif token_text and token_text[0].isspace():
@@ -665,11 +763,13 @@ class TextStreamForwarder(FrameProcessor):
             if self._text_only:
                 # ── text_only: stream every token immediately (fast) ──
                 try:
-                    await self._websocket.send_json({
-                        "type": "bot_text",
-                        "text": token_text,  # Send original text to client
-                        "streaming": True,
-                    })
+                    await self._websocket.send_json(
+                        {
+                            "type": "bot_text",
+                            "text": token_text,  # Send original text to client
+                            "streaming": True,
+                        }
+                    )
                     logger.debug(f"[TEXT_STREAM] Sent token: '{token_text}'")
                 except Exception as e:
                     logger.warning(f"[TEXT_STREAM] Failed to send token: {e}")
@@ -686,7 +786,9 @@ class TextStreamForwarder(FrameProcessor):
                         if self._metrics_sentences_queued == 1:
                             self._metrics_first_sentence_queued_at = time.time()
                         self._start_watchdog()
-                        logger.debug(f"[TEXT_STREAM] Queued sentence #{self._metrics_sentences_queued}: '{sentence[:60]}'")
+                        logger.debug(
+                            f"[TEXT_STREAM] Queued sentence #{self._metrics_sentences_queued}: '{sentence[:60]}'"
+                        )
                     self._sentence_buffer = ""
                     self._needs_space_before_next = True
 
@@ -700,12 +802,16 @@ class TextStreamForwarder(FrameProcessor):
             if self._text_only:
                 # text_only: send bot_text_complete immediately (no TTS to wait for)
                 try:
-                    await self._websocket.send_json({
-                        "type": "bot_text_complete",
-                        "text": self._current_response,
-                        "interrupted": False,
-                    })
-                    logger.info(f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'")
+                    await self._websocket.send_json(
+                        {
+                            "type": "bot_text_complete",
+                            "text": self._current_response,
+                            "interrupted": False,
+                        }
+                    )
+                    logger.info(
+                        f"[TEXT_STREAM] Complete response: '{self._current_response[:120]}{'...' if len(self._current_response) > 120 else ''}'"
+                    )
                 except Exception as e:
                     logger.debug(f"[TEXT_STREAM] Failed to send complete text: {e}")
                 self._current_response = ""
@@ -753,7 +859,12 @@ class TextAudioSyncNotifier(FrameProcessor):
     it sends ``bot_text_complete`` so the client finalizes the display.
     """
 
-    def __init__(self, text_forwarder: TextStreamForwarder, name: str = "TextAudioSyncNotifier", **kwargs):
+    def __init__(
+        self,
+        text_forwarder: TextStreamForwarder,
+        name: str = "TextAudioSyncNotifier",
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
         self._text_forwarder = text_forwarder
         # Counter of in-flight TTS sentences (incremented on TTSStartedFrame,
@@ -767,17 +878,21 @@ class TextAudioSyncNotifier(FrameProcessor):
         """Send bot_text_complete if the LLM response is finished, all sentences
         released, AND TTS has finished generating audio for ALL sentences."""
         fwd = self._text_forwarder
-        if (not fwd._in_response
-                and fwd._sentence_q.empty()
-                and fwd._current_response
-                and self._tts_in_flight <= 0):
+        if (
+            not fwd._in_response
+            and fwd._sentence_q.empty()
+            and fwd._current_response
+            and self._tts_in_flight <= 0
+        ):
             fwd._stop_watchdog()
             try:
-                await fwd._websocket.send_json({
-                    "type": "bot_text_complete",
-                    "text": fwd._current_response,
-                    "interrupted": False,
-                })
+                await fwd._websocket.send_json(
+                    {
+                        "type": "bot_text_complete",
+                        "text": fwd._current_response,
+                        "interrupted": False,
+                    }
+                )
                 logger.info(
                     f"[TEXT_SYNC] Complete response (after TTS): "
                     f"'{fwd._current_response[:120]}{'...' if len(fwd._current_response) > 120 else ''}'"
@@ -792,7 +907,9 @@ class TextAudioSyncNotifier(FrameProcessor):
 
         if isinstance(frame, TTSStartedFrame):
             self._tts_in_flight += 1
-            logger.debug(f"[TEXT_SYNC] TTSStartedFrame — in_flight={self._tts_in_flight}")
+            logger.debug(
+                f"[TEXT_SYNC] TTSStartedFrame — in_flight={self._tts_in_flight}"
+            )
             # TTS just started speaking — release ALL pending sentence text
             # to the client.  We release ALL (not just one) because the TTS
             # aggregator may merge multiple TextStreamForwarder sentences into
@@ -806,7 +923,9 @@ class TextAudioSyncNotifier(FrameProcessor):
                 await fwd.release_next_sentence()
                 released += 1
             if released > 1:
-                logger.debug(f"[TEXT_SYNC] Released {released} sentences on TTSStartedFrame")
+                logger.debug(
+                    f"[TEXT_SYNC] Released {released} sentences on TTSStartedFrame"
+                )
             # NOTE: Do NOT call _send_complete_if_done() here.  TTS is still
             # generating audio.  Wait for TTSStoppedFrame to finalize.
 
@@ -848,11 +967,13 @@ class TextAudioSyncNotifier(FrameProcessor):
             await fwd.flush_all_queued()
             if fwd._current_response:
                 try:
-                    await fwd._websocket.send_json({
-                        "type": "bot_text_complete",
-                        "text": fwd._current_response,
-                        "interrupted": True,
-                    })
+                    await fwd._websocket.send_json(
+                        {
+                            "type": "bot_text_complete",
+                            "text": fwd._current_response,
+                            "interrupted": True,
+                        }
+                    )
                     logger.info(
                         f"[TEXT_SYNC] Interrupted response sent "
                         f"({len(fwd._current_response)} chars): "
@@ -899,11 +1020,13 @@ class UserTranscriptForwarder(FrameProcessor):
         if isinstance(frame, TranscriptionFrame):
             try:
                 display_text = self._clean_for_display(frame.text)
-                await self._websocket.send_json({
-                    "type": "user_transcript",
-                    "text": display_text,
-                    "final": True,
-                })
+                await self._websocket.send_json(
+                    {
+                        "type": "user_transcript",
+                        "text": display_text,
+                        "final": True,
+                    }
+                )
                 logger.info(f"[USER_TEXT] Sent final transcript: '{display_text[:80]}'")
             except Exception as e:
                 logger.warning(f"[USER_TEXT] Failed to send transcript: {e}")
@@ -912,11 +1035,13 @@ class UserTranscriptForwarder(FrameProcessor):
         elif isinstance(frame, InterimTranscriptionFrame):
             try:
                 display_text = self._clean_for_display(frame.text)
-                await self._websocket.send_json({
-                    "type": "user_transcript",
-                    "text": display_text,
-                    "final": False,
-                })
+                await self._websocket.send_json(
+                    {
+                        "type": "user_transcript",
+                        "text": display_text,
+                        "final": False,
+                    }
+                )
             except Exception as e:
                 logger.debug(f"[USER_TEXT] Failed to send interim: {e}")
             await self.push_frame(frame, direction)
@@ -965,9 +1090,9 @@ class STTClarityGate(FrameProcessor):
 
     # Echo-back confirmation messages (for medium-low confidence)
     _ECHO_MESSAGES = {
-        "en": "Did you say: \"{text}\"?",
-        "hi": "क्या आपने कहा: \"{text}\"?",
-        "ta": "நீங்கள் சொன்னது: \"{text}\" என்பதா?",
+        "en": 'Did you say: "{text}"?',
+        "hi": 'क्या आपने कहा: "{text}"?',
+        "ta": 'நீங்கள் சொன்னது: "{text}" என்பதா?',
     }
 
     def __init__(
@@ -1024,7 +1149,9 @@ class STTClarityGate(FrameProcessor):
             self._consecutive_low = 0
             self._total_passed += 1
             if self._metrics_collector:
-                self._metrics_collector.record_stt_clarity(clarity, gated=False, language=lang)
+                self._metrics_collector.record_stt_clarity(
+                    clarity, gated=False, language=lang
+                )
             logger.debug(
                 f"[CLARITY_GATE] PASS | score={clarity:.2f} | "
                 f"text='{raw_text[:60]}'"
@@ -1040,7 +1167,9 @@ class STTClarityGate(FrameProcessor):
         if self._consecutive_low > self._max_retries:
             self._total_force_passed += 1
             if self._metrics_collector:
-                self._metrics_collector.record_stt_clarity(clarity, gated=False, language=lang)
+                self._metrics_collector.record_stt_clarity(
+                    clarity, gated=False, language=lang
+                )
             logger.warning(
                 f"[CLARITY_GATE] FORCE_PASS | score={clarity:.2f} | "
                 f"consecutive_low={self._consecutive_low} > max_retries={self._max_retries} | "
@@ -1053,7 +1182,9 @@ class STTClarityGate(FrameProcessor):
         # Gate the transcription — don't send to LLM
         self._total_gated += 1
         if self._metrics_collector:
-            self._metrics_collector.record_stt_clarity(clarity, gated=True, language=lang)
+            self._metrics_collector.record_stt_clarity(
+                clarity, gated=True, language=lang
+            )
         logger.info(
             f"[CLARITY_GATE] GATED | score={clarity:.2f} | "
             f"attempt={self._consecutive_low}/{self._max_retries} | "
@@ -1068,14 +1199,16 @@ class STTClarityGate(FrameProcessor):
 
         # Notify the client about the clarification
         try:
-            await self._websocket.send_json({
-                "type": "stt_clarification",
-                "message": clarification,
-                "clarity_score": clarity,
-                "original_text": raw_text,
-                "attempt": self._consecutive_low,
-                "max_retries": self._max_retries,
-            })
+            await self._websocket.send_json(
+                {
+                    "type": "stt_clarification",
+                    "message": clarification,
+                    "clarity_score": clarity,
+                    "original_text": raw_text,
+                    "attempt": self._consecutive_low,
+                    "max_retries": self._max_retries,
+                }
+            )
         except Exception as e:
             logger.warning(f"[CLARITY_GATE] Failed to send clarification JSON: {e}")
 
@@ -1104,7 +1237,9 @@ class TextInputInjector(FrameProcessor):
     frames downstream through the pipeline.
     """
 
-    def __init__(self, session_id: str, websocket=None, name: str = "TextInputInjector", **kwargs):
+    def __init__(
+        self, session_id: str, websocket=None, name: str = "TextInputInjector", **kwargs
+    ):
         super().__init__(name=name, **kwargs)
         self._session_id = session_id
         self._websocket = websocket
@@ -1114,7 +1249,9 @@ class TextInputInjector(FrameProcessor):
 
     async def inject_text(self, text: str):
         """Put text into the injection queue."""
-        logger.info(f"[TEXT_INJECT] Queuing text for session {self._session_id}: '{text[:80]}'")
+        logger.info(
+            f"[TEXT_INJECT] Queuing text for session {self._session_id}: '{text[:80]}'"
+        )
         await self._queue.put(text)
 
     async def _poll_loop(self):
@@ -1127,27 +1264,37 @@ class TextInputInjector(FrameProcessor):
                 if text is None:
                     break  # Sentinel to stop
 
-                logger.info(f"[TEXT_INJECT] Injecting text as transcription: '{text[:80]}'")
+                logger.info(
+                    f"[TEXT_INJECT] Injecting text as transcription: '{text[:80]}'"
+                )
 
                 # Send user_transcript to the client so the frontend shows the text
                 if self._websocket:
                     try:
-                        await self._websocket.send_json({
-                            "type": "user_transcript",
-                            "text": text,
-                            "final": True,
-                        })
+                        await self._websocket.send_json(
+                            {
+                                "type": "user_transcript",
+                                "text": text,
+                                "final": True,
+                            }
+                        )
                     except Exception as e:
-                        logger.warning(f"[TEXT_INJECT] Failed to send user_transcript: {e}")
+                        logger.warning(
+                            f"[TEXT_INJECT] Failed to send user_transcript: {e}"
+                        )
 
                 # Simulate the STT output: UserStartedSpeaking -> Transcription -> UserStoppedSpeaking
                 # This triggers the LLM context aggregator properly
-                await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+                await self.push_frame(
+                    UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM
+                )
                 await self.push_frame(
                     TranscriptionFrame(text=text, user_id="typed", timestamp=""),
                     FrameDirection.DOWNSTREAM,
                 )
-                await self.push_frame(UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+                await self.push_frame(
+                    UserStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM
+                )
 
             except asyncio.TimeoutError:
                 continue
@@ -1208,7 +1355,13 @@ class GreetingProcessor(FrameProcessor):
     Can be skipped for reconnects where the room already has conversation history.
     """
 
-    def __init__(self, greeting_text: str, name: str = "GreetingProcessor", skip: bool = False, **kwargs):
+    def __init__(
+        self,
+        greeting_text: str,
+        name: str = "GreetingProcessor",
+        skip: bool = False,
+        **kwargs,
+    ):
         super().__init__(name=name, **kwargs)
         self._greeting_text = greeting_text
         self._greeting_spoken = False
@@ -1230,7 +1383,9 @@ class GreetingProcessor(FrameProcessor):
             await asyncio.sleep(0.3)
             logger.info(f"[GREETING] Speaking: '{self._greeting_text}'")
             # Use TTSSpeakFrame for immediate synthesis (bypasses text aggregator)
-            await self.push_frame(TTSSpeakFrame(text=self._greeting_text), FrameDirection.DOWNSTREAM)
+            await self.push_frame(
+                TTSSpeakFrame(text=self._greeting_text), FrameDirection.DOWNSTREAM
+            )
             return  # Don't push StartFrame again
 
         # Forward the original frame
@@ -1329,7 +1484,9 @@ def load_system_prompt(version: str = PROMPT_VERSION, mode: str = "voice") -> st
         elif mode_prompt:
             return mode_prompt
         else:
-            logger.warning(f"No v4 prompt files found for {version}/{mode}, using fallback")
+            logger.warning(
+                f"No v4 prompt files found for {version}/{mode}, using fallback"
+            )
             return "You are a helpful voice assistant. Keep responses concise."
     else:
         # Legacy single-file prompts (v1, v2, v3)
@@ -1344,13 +1501,16 @@ def get_default_system_prompt() -> str:
 
 # Greeting text spoken when connection is established
 # NOTE: Single sentence avoids TTS splitting into multiple audio segments
-GREETING_TEXT = os.getenv("GREETING_TEXT",
-    "Namaste! I'm Mira, your study buddy. I speak English, Hindi, and Tamil. Ask me anything!")
+GREETING_TEXT = os.getenv(
+    "GREETING_TEXT",
+    "Namaste! I'm Mira, your study buddy. I speak English, Hindi, and Tamil. Ask me anything!",
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Provider factories — swap provider via env var, no code changes.
 # ─────────────────────────────────────────────────────────────────────
+
 
 def _normalize_language_hint(lang: str) -> Optional[str]:
     """Normalize language hint values to Soniox-friendly short codes."""
@@ -1365,7 +1525,9 @@ def _normalize_language_hint(lang: str) -> Optional[str]:
     return alias_map.get(normalized, normalized)
 
 
-def create_stt_service(sample_rate: int = None, language_hints_override: list[str] | None = None):
+def create_stt_service(
+    sample_rate: int = None, language_hints_override: list[str] | None = None
+):
     """
     Create an STT service based on STT_PROVIDER env var.
 
@@ -1401,7 +1563,10 @@ def create_stt_service(sample_rate: int = None, language_hints_override: list[st
         if not DEEPGRAM_API_KEY:
             raise ValueError("DEEPGRAM_API_KEY is required when STT_PROVIDER=deepgram")
         from pipecat.services.deepgram.stt import DeepgramSTTService
-        logger.info(f"Creating STT service: Deepgram (language={lang_hints[0] if lang_hints else 'en'})")
+
+        logger.info(
+            f"Creating STT service: Deepgram (language={lang_hints[0] if lang_hints else 'en'})"
+        )
         return DeepgramSTTService(
             api_key=DEEPGRAM_API_KEY,
             sample_rate=sr,
@@ -1409,6 +1574,7 @@ def create_stt_service(sample_rate: int = None, language_hints_override: list[st
 
     elif provider == "whisper":
         from pipecat.services.whisper.stt import WhisperSTTService
+
         logger.info("Creating STT service: Whisper (local)")
         return WhisperSTTService()
 
@@ -1434,7 +1600,9 @@ def create_tts_service(sample_rate: int = None):
     sr = sample_rate or TTS_SAMPLE_RATE
 
     if provider == "elevenlabs" and ELEVENLABS_API_KEY:
-        logger.info(f"Creating TTS service: ElevenLabs (voice_gender={TTS_VOICE_GENDER})")
+        logger.info(
+            f"Creating TTS service: ElevenLabs (voice_gender={TTS_VOICE_GENDER})"
+        )
         return create_elevenlabs_tts(
             api_key=ELEVENLABS_API_KEY,
             voice_gender=TTS_VOICE_GENDER,
@@ -1443,7 +1611,11 @@ def create_tts_service(sample_rate: int = None):
 
     elif provider == "svara":
         logger.info("Creating TTS service: Svara")
-        tts_base_url = TTS_WS_URL.replace("ws://", "http://").replace("wss://", "https://").rsplit("/v1/", 1)[0]
+        tts_base_url = (
+            TTS_WS_URL.replace("ws://", "http://")
+            .replace("wss://", "https://")
+            .rsplit("/v1/", 1)[0]
+        )
         return SvaraTTSService(
             base_url=tts_base_url,
             api_key=TTS_WS_API_KEY,
@@ -1455,6 +1627,7 @@ def create_tts_service(sample_rate: int = None):
 
     elif provider == "openai":
         from pipecat.services.openai.tts import OpenAITTSService
+
         logger.info(f"Creating TTS service: OpenAI (voice={OPENAI_TTS_VOICE})")
         return OpenAITTSService(
             api_key=LLM_API_KEY,
@@ -1488,7 +1661,9 @@ def create_llm_service():
 
     # All supported providers use the OpenAI-compatible API
     if provider in ("openai", "groq", "vllm"):
-        logger.info(f"Creating LLM service: {provider} (model={LLM_MODEL}, base_url={LLM_BASE_URL})")
+        logger.info(
+            f"Creating LLM service: {provider} (model={LLM_MODEL}, base_url={LLM_BASE_URL})"
+        )
         # Only send chat_template_kwargs to vLLM endpoints.
         # vLLM reasoning models need enable_thinking=False to avoid burning tokens
         # on reasoning_content before producing actual content tokens.
@@ -1505,8 +1680,7 @@ def create_llm_service():
 
     else:
         raise ValueError(
-            f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: openai, groq, vllm"
+            f"Unknown LLM_PROVIDER: '{provider}'. " f"Supported: openai, groq, vllm"
         )
 
 
@@ -1566,7 +1740,9 @@ async def create_bot_pipeline(
     )
 
     # === STT Service (provider-agnostic factory) ===
-    stt = create_stt_service(sample_rate=STT_SAMPLE_RATE, language_hints_override=stt_language_hints)
+    stt = create_stt_service(
+        sample_rate=STT_SAMPLE_RATE, language_hints_override=stt_language_hints
+    )
 
     # === TTS Service (provider-agnostic factory) — skipped in text_only mode ===
     tts = None if text_only else create_tts_service(sample_rate=TTS_SAMPLE_RATE)
@@ -1579,8 +1755,10 @@ async def create_bot_pipeline(
 
     # === Register Function Handler for Voice Switching (only when TTS is active) ===
     from openai import NOT_GIVEN
+
     tools = NOT_GIVEN
     if tts is not None:
+
         async def handle_select_voice(params: FunctionCallParams):
             """Handle voice switching function call from LLM."""
             switch_mode = params.arguments.get("mode", "switch")
@@ -1591,14 +1769,18 @@ async def create_bot_pipeline(
             await tts._disconnect()
             await tts._connect()
 
-            logger.info(f"[VOICE SWITCH] Mode: {switch_mode}, New voice: {new_gender} ({new_voice_id})")
+            logger.info(
+                f"[VOICE SWITCH] Mode: {switch_mode}, New voice: {new_gender} ({new_voice_id})"
+            )
 
             # Return result to LLM so it can acknowledge the change
-            await params.result_callback({
-                "success": True,
-                "new_voice": new_gender,
-                "message": f"Voice switched to {new_gender}"
-            })
+            await params.result_callback(
+                {
+                    "success": True,
+                    "new_voice": new_gender,
+                    "message": f"Voice switched to {new_gender}",
+                }
+            )
 
         llm.register_function("select_voice", handle_select_voice)
         tools = ToolsSchema(standard_tools=[SELECT_VOICE_SCHEMA])
@@ -1607,14 +1789,18 @@ async def create_bot_pipeline(
     # Build initial messages with system prompt and optional user-provided context
     effective_prompt = system_prompt if system_prompt else get_default_system_prompt()
     messages = [{"role": "system", "content": effective_prompt}]
-    logger.info(f"[PIPELINE] System prompt: {len(effective_prompt)} chars (version={PROMPT_VERSION})")
+    logger.info(
+        f"[PIPELINE] System prompt: {len(effective_prompt)} chars (version={PROMPT_VERSION})"
+    )
     # Pre-seed the greeting only for 1:1 tutor sessions (not classroom/discussion).
     # Classroom greeting is handled separately by send_first_join_greeting().
     if not skip_greeting and not is_classroom:
         messages.append({"role": "assistant", "content": GREETING_TEXT})
     if context_messages:
         messages.extend(context_messages)
-        logger.info(f"[PIPELINE] Seeded LLM context with {len(context_messages)} prior messages")
+        logger.info(
+            f"[PIPELINE] Seeded LLM context with {len(context_messages)} prior messages"
+        )
 
     context = LLMContext(messages=messages, tools=tools)
 
@@ -1684,22 +1870,24 @@ async def create_bot_pipeline(
     injector_list = [text_injector] if text_injector else []
     if text_only:
         logger.info("[PIPELINE] text_only mode: TTS skipped, text streamed via JSON")
-        pipeline = Pipeline([
-            transport.input(),              # 1. Receive audio from client
-            stt,                            # 2. Speech-to-text
-            *injector_list,                 # 2b. Text injection point (typed text)
-            user_transcript_forwarder,      # 3. Send user transcript to client
-            clarity_gate,                   # 3b. Gate low-clarity STT (ask to repeat)
-            user_aggregator,                # 4. Collect user messages and trigger LLM
-            llm,                            # 5. Language model
-            action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
-            transcript_logger,              # 6. Log conversation turns
-            *extra_processors,              # 7. Optional taps (e.g., classroom)
-            greeting_processor,             # 8. Inject greeting on StartFrame
-            text_forwarder,                 # 9. Stream text as JSON (TTS skipped)
-            transport.output(),             # 10. Transport (audio-in still works)
-            assistant_aggregator,           # 11. Collect assistant responses for context
-        ])
+        pipeline = Pipeline(
+            [
+                transport.input(),  # 1. Receive audio from client
+                stt,  # 2. Speech-to-text
+                *injector_list,  # 2b. Text injection point (typed text)
+                user_transcript_forwarder,  # 3. Send user transcript to client
+                clarity_gate,  # 3b. Gate low-clarity STT (ask to repeat)
+                user_aggregator,  # 4. Collect user messages and trigger LLM
+                llm,  # 5. Language model
+                action_tag_filter,  # 5b. Strip [TEACHER_ACTION:...] tags from output
+                transcript_logger,  # 6. Log conversation turns
+                *extra_processors,  # 7. Optional taps (e.g., classroom)
+                greeting_processor,  # 8. Inject greeting on StartFrame
+                text_forwarder,  # 9. Stream text as JSON (TTS skipped)
+                transport.output(),  # 10. Transport (audio-in still works)
+                assistant_aggregator,  # 11. Collect assistant responses for context
+            ]
+        )
     else:
         logger.info("[PIPELINE] text_and_audio mode: text synced with TTS audio")
         # TextAudioSyncNotifier sits after TTS and triggers text release
@@ -1708,24 +1896,26 @@ async def create_bot_pipeline(
             text_forwarder=text_forwarder,
             name="TextAudioSyncNotifier",
         )
-        pipeline = Pipeline([
-            transport.input(),              # 1. Receive audio from client
-            stt,                            # 2. Speech-to-text
-            *injector_list,                 # 2b. Text injection point (typed text)
-            user_transcript_forwarder,      # 3. Send user transcript to client
-            clarity_gate,                   # 3b. Gate low-clarity STT (ask to repeat)
-            user_aggregator,                # 4. Collect user messages and trigger LLM
-            llm,                            # 5. Language model
-            action_tag_filter,              # 5b. Strip [TEACHER_ACTION:...] tags from output
-            transcript_logger,              # 6. Log conversation turns
-            *extra_processors,              # 7. Optional taps (e.g., classroom)
-            greeting_processor,             # 8. Inject greeting on StartFrame
-            text_forwarder,                 # 9. Queue text sentences (don't send yet)
-            tts,                            # 10. Text-to-speech (audio)
-            text_audio_sync,                # 10b. On TTSStarted → release queued text
-            transport.output(),             # 11. Send audio to client
-            assistant_aggregator,           # 12. Collect assistant responses for context
-        ])
+        pipeline = Pipeline(
+            [
+                transport.input(),  # 1. Receive audio from client
+                stt,  # 2. Speech-to-text
+                *injector_list,  # 2b. Text injection point (typed text)
+                user_transcript_forwarder,  # 3. Send user transcript to client
+                clarity_gate,  # 3b. Gate low-clarity STT (ask to repeat)
+                user_aggregator,  # 4. Collect user messages and trigger LLM
+                llm,  # 5. Language model
+                action_tag_filter,  # 5b. Strip [TEACHER_ACTION:...] tags from output
+                transcript_logger,  # 6. Log conversation turns
+                *extra_processors,  # 7. Optional taps (e.g., classroom)
+                greeting_processor,  # 8. Inject greeting on StartFrame
+                text_forwarder,  # 9. Queue text sentences (don't send yet)
+                tts,  # 10. Text-to-speech (audio)
+                text_audio_sync,  # 10b. On TTSStarted → release queued text
+                transport.output(),  # 11. Send audio to client
+                assistant_aggregator,  # 12. Collect assistant responses for context
+            ]
+        )
 
     # Create task and runner
     # Build interruption strategies: require minimum words before barge-in
@@ -1798,6 +1988,23 @@ async def run_bot(
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Pipecat client connected")
+        # Send BotReady signals to unblock the Pipecat JS SDK connect() promise
+        try:
+            from pipecat.frames.frames import TransportMessageUrgentFrame
+
+            frame = TransportMessageUrgentFrame(
+                message={
+                    "label": "rtvi-ai",
+                    "type": "bot-ready",
+                    "data": {"version": "0.1"},
+                }
+            )
+            await task.queue_frame(frame)
+            logger.info(
+                "Sent BotReady signals to client via TransportMessageUrgentFrame"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send BotReady signals: {e}")
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):

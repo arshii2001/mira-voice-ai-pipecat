@@ -1,0 +1,422 @@
+2026-02-25 05:20:05.132 | INFO     | pipecat:<module>:14 - ᓚᘏᗢ Pipecat 0.0.98 (Python 3.12.12 (main, Feb 24 2026, 19:45:37) [GCC 14.2.0]) ᓚᘏᗢ
+2026-02-25 05:20:10,136 - provider_config - INFO - [CONFIG] LLM resolved: LLMConfig(provider='groq', model='openai/gpt-oss-120b', base_url='https://api.groq.com/openai/v1', is_vllm=False)
+2026-02-25 05:20:10,136 - provider_config - INFO - [CONFIG] TTS resolved: provider=elevenlabs, sample_rate=24000
+2026-02-25 05:20:10,136 - provider_config - INFO - [CONFIG] STT resolved: provider=deepgram, language_hints=en,hi,ta
+2026-02-25 05:20:10,203 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 05:20:10,204 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 05:20:10,213 - translator - INFO - Translator initialized: model=openai/gpt-oss-120b, base_url=https://api.groq.com/openai/v1
+2026-02-25 05:20:10,213 - classroom - INFO - Classroom translator initialized
+2026-02-25 05:20:10,216 - services.classroom_tts - INFO - ClassroomTTS initialized: provider=elevenlabs, voice=2zRM7PkgwBPiau2jvVXc, model=eleven_multilingual_v2, sr=24000
+2026-02-25 05:20:10,217 - classroom - INFO - Classroom TTS initialized (provider from TTS_PROVIDER)
+2026-02-25 05:20:10,217 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 05:20:10,218 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 05:20:10,225 - classroom - INFO - Classroom LLM client initialized (model=openai/gpt-oss-120b)
+2026-02-25 05:20:10,225 - classroom - INFO - [CLASSROOM] Default permanent room created: default (Mira Classroom)
+2026-02-25 05:20:10,280 - __main__ - INFO - Starting server with HTTP on port 7860
+2026-02-25 05:20:10,281 - asyncio - DEBUG - Using selector: EpollSelector
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+2026-02-25 05:20:10,293 - __main__ - INFO - Starting MiraVoiceAI Pipecat server...
+2026-02-25 05:20:10,294 - aiosqlite - DEBUG - executing <function connect.<locals>.connector at 0x71dc10d96700>
+2026-02-25 05:20:10,295 - aiosqlite - DEBUG - operation <function connect.<locals>.connector at 0x71dc10d96700> completed
+2026-02-25 05:20:10,296 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA journal_mode=WAL', [])
+2026-02-25 05:20:10,298 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA journal_mode=WAL', []) completed
+2026-02-25 05:20:10,299 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA foreign_keys=ON', [])
+2026-02-25 05:20:10,299 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA foreign_keys=ON', []) completed
+2026-02-25 05:20:10,299 - aiosqlite - DEBUG - executing functools.partial(<built-in method executescript of sqlite3.Connection object at 0x71dc10e03970>, "\nCREATE TABLE IF NOT EXISTS sessions (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL,\n    room_name TEXT NOT NULL DEFAULT '',\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    speaker_ids TEXT DEFAULT '[]',\n    participant_count INTEGER DEFAULT 0,\n    message_count INTEGER DEFAULT 0,\n    summary TEXT,\n    quiz_json TEXT\n);\n\nCREATE TABLE IF NOT EXISTS messages (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    role TEXT NOT NULL,\n    speaker_id TEXT,\n    speaker_name TEXT,\n    content TEXT NOT NULL DEFAULT '',\n    original_language TEXT DEFAULT 'en',\n    translations TEXT DEFAULT '{}',\n    timestamp REAL NOT NULL,\n    reaction_counts TEXT DEFAULT '{}',\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS hand_raises (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'pending',\n    question_preview TEXT,\n    raised_at REAL NOT NULL,\n    resolved_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS reactions (\n    id TEXT PRIMARY KEY,\n    message_id TEXT NOT NULL,\n    session_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    emoji TEXT NOT NULL,\n    timestamp REAL NOT NULL,\n    FOREIGN KEY (message_id) REFERENCES messages(id),\n    FOREIGN KEY (session_id) REFERENCES sessions(id),\n    UNIQUE(message_id, user_id, emoji)\n);\n\nCREATE TABLE IF NOT EXISTS recordings (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    filename TEXT NOT NULL,\n    duration_secs REAL DEFAULT 0.0,\n    size_bytes INTEGER DEFAULT 0,\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS teacher_role_requests (\n    id TEXT PRIMARY KEY,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    user_email TEXT NOT NULL DEFAULT '',\n    purpose TEXT,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at REAL NOT NULL,\n    reviewed_at REAL,\n    reviewed_by TEXT,\n    review_note TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);\nCREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);\nCREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_session ON hand_raises(session_id);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_status ON hand_raises(status);\nCREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);\nCREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);\n\n-- ── Persistence tables (rooms, users, memberships) ──\n\nCREATE TABLE IF NOT EXISTS rooms (\n    room_id TEXT PRIMARY KEY,\n    name TEXT NOT NULL DEFAULT 'Classroom',\n    topic TEXT,\n    created_by TEXT,\n    created_by_name TEXT,\n    settings_json TEXT DEFAULT '{}',\n    is_permanent INTEGER DEFAULT 0,\n    room_type TEXT DEFAULT 'teacher_driven',\n    created_at REAL NOT NULL,\n    updated_at REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS user_profiles (\n    user_id TEXT PRIMARY KEY,\n    display_name TEXT NOT NULL,\n    preferred_language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    settings_json TEXT DEFAULT '{}',\n    created_at REAL NOT NULL,\n    last_seen REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS room_members (\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    display_name TEXT NOT NULL,\n    language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    mode TEXT DEFAULT 'text_only',\n    joined_at REAL NOT NULL,\n    last_active REAL NOT NULL,\n    PRIMARY KEY (room_id, user_id),\n    FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE,\n    FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE\n);\n\nCREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);\nCREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);\nCREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_user ON teacher_role_requests(user_id);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_status ON teacher_role_requests(status);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_created_at ON teacher_role_requests(created_at);\n")
+2026-02-25 05:20:10,300 - aiosqlite - DEBUG - operation functools.partial(<built-in method executescript of sqlite3.Connection object at 0x71dc10e03970>, "\nCREATE TABLE IF NOT EXISTS sessions (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL,\n    room_name TEXT NOT NULL DEFAULT '',\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    speaker_ids TEXT DEFAULT '[]',\n    participant_count INTEGER DEFAULT 0,\n    message_count INTEGER DEFAULT 0,\n    summary TEXT,\n    quiz_json TEXT\n);\n\nCREATE TABLE IF NOT EXISTS messages (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    role TEXT NOT NULL,\n    speaker_id TEXT,\n    speaker_name TEXT,\n    content TEXT NOT NULL DEFAULT '',\n    original_language TEXT DEFAULT 'en',\n    translations TEXT DEFAULT '{}',\n    timestamp REAL NOT NULL,\n    reaction_counts TEXT DEFAULT '{}',\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS hand_raises (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'pending',\n    question_preview TEXT,\n    raised_at REAL NOT NULL,\n    resolved_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS reactions (\n    id TEXT PRIMARY KEY,\n    message_id TEXT NOT NULL,\n    session_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    emoji TEXT NOT NULL,\n    timestamp REAL NOT NULL,\n    FOREIGN KEY (message_id) REFERENCES messages(id),\n    FOREIGN KEY (session_id) REFERENCES sessions(id),\n    UNIQUE(message_id, user_id, emoji)\n);\n\nCREATE TABLE IF NOT EXISTS recordings (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    filename TEXT NOT NULL,\n    duration_secs REAL DEFAULT 0.0,\n    size_bytes INTEGER DEFAULT 0,\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS teacher_role_requests (\n    id TEXT PRIMARY KEY,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    user_email TEXT NOT NULL DEFAULT '',\n    purpose TEXT,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at REAL NOT NULL,\n    reviewed_at REAL,\n    reviewed_by TEXT,\n    review_note TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);\nCREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);\nCREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_session ON hand_raises(session_id);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_status ON hand_raises(status);\nCREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);\nCREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);\n\n-- ── Persistence tables (rooms, users, memberships) ──\n\nCREATE TABLE IF NOT EXISTS rooms (\n    room_id TEXT PRIMARY KEY,\n    name TEXT NOT NULL DEFAULT 'Classroom',\n    topic TEXT,\n    created_by TEXT,\n    created_by_name TEXT,\n    settings_json TEXT DEFAULT '{}',\n    is_permanent INTEGER DEFAULT 0,\n    room_type TEXT DEFAULT 'teacher_driven',\n    created_at REAL NOT NULL,\n    updated_at REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS user_profiles (\n    user_id TEXT PRIMARY KEY,\n    display_name TEXT NOT NULL,\n    preferred_language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    settings_json TEXT DEFAULT '{}',\n    created_at REAL NOT NULL,\n    last_seen REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS room_members (\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    display_name TEXT NOT NULL,\n    language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    mode TEXT DEFAULT 'text_only',\n    joined_at REAL NOT NULL,\n    last_active REAL NOT NULL,\n    PRIMARY KEY (room_id, user_id),\n    FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE,\n    FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE\n);\n\nCREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);\nCREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);\nCREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_user ON teacher_role_requests(user_id);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_status ON teacher_role_requests(status);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_created_at ON teacher_role_requests(created_at);\n") completed
+2026-02-25 05:20:10,300 - aiosqlite - DEBUG - executing functools.partial(<built-in method commit of sqlite3.Connection object at 0x71dc10e03970>)
+2026-02-25 05:20:10,300 - aiosqlite - DEBUG - operation functools.partial(<built-in method commit of sqlite3.Connection object at 0x71dc10e03970>) completed
+2026-02-25 05:20:10,301 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA table_info(rooms)', [])
+2026-02-25 05:20:10,301 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'PRAGMA table_info(rooms)', []) completed
+2026-02-25 05:20:10,301 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,301 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,302 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,302 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,302 - database - INFO - [DB] Classroom database initialized at /app/data/classroom.db
+2026-02-25 05:20:10,302 - classroom - INFO - [CLASSROOM] Database initialized
+2026-02-25 05:20:10,302 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM rooms ORDER BY created_at DESC', [])
+2026-02-25 05:20:10,303 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM rooms ORDER BY created_at DESC', []) completed
+2026-02-25 05:20:10,303 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,303 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,303 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,303 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,304 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM room_members WHERE room_id = ? ORDER BY joined_at ASC', ('default',))
+2026-02-25 05:20:10,304 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM room_members WHERE room_id = ? ORDER BY joined_at ASC', ('default',)) completed
+2026-02-25 05:20:10,304 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,304 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,305 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,305 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,305 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?', ('default', 20))
+2026-02-25 05:20:10,305 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x71dc10e03970>, 'SELECT * FROM messages WHERE room_id = ? ORDER BY timestamp DESC LIMIT ?', ('default', 20)) completed
+2026-02-25 05:20:10,306 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,306 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,306 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>)
+2026-02-25 05:20:10,306 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x71dc10ddee40>) completed
+2026-02-25 05:20:10,306 - classroom - INFO - [CLASSROOM] Hydrated 1 rooms from database
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:7860 (Press CTRL+C to quit)
+INFO:     127.0.0.1:33366 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41890 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55900 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51966 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49644 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41200 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47168 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45250 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34862 - "GET /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:37242 - "GET /health HTTP/1.1" 200 OK
+INFO:     ('172.18.0.1', 37252) - "WebSocket /ws" [accepted]
+2026-02-25 05:21:35,480 - __main__ - INFO - WebSocket connection accepted
+INFO:     connection open
+2026-02-25 05:21:35,486 - __main__ - INFO - Received client config message
+2026-02-25 05:21:35,487 - __main__ - INFO - Sent session_id to client: 4ade3eee-aee1-485d-8c27-762891c75f06
+2026-02-25 05:21:35,487 - __main__ - INFO - [TUTOR] STT language hints enforced: ['en'] (registered_lang=en(default))
+2026-02-25 05:21:35,488 - bot - INFO - Creating pipeline (mode=text_and_audio)
+2026-02-25 05:21:35.489 | DEBUG    | pipecat.audio.vad.silero:__init__:147 - Loading Silero VAD model...
+2026-02-25 05:21:35.646 | DEBUG    | pipecat.audio.vad.silero:__init__:169 - Loaded Silero VAD
+2026-02-25 05:21:36,029 - bot - INFO - Creating STT service: Deepgram (language=en)
+2026-02-25 05:21:36,032 - bot - INFO - Creating TTS service: ElevenLabs (voice_gender=female)
+2026-02-25 05:21:36,032 - services.elevenlabs_tts - INFO - Creating ElevenLabs TTS: voice=Rachel - Calm & Clear (21m00Tcm4TlvDq8ikWAM), model=eleven_multilingual_v2
+2026-02-25 05:21:36,032 - services.elevenlabs_tts - INFO - ElevenLabs voice params: stability=0.75, similarity=0.85, style=0.0
+2026-02-25 05:21:36,032 - bot - INFO - Creating LLM service: groq (model=openai/gpt-oss-120b, base_url=https://api.groq.com/openai/v1)
+2026-02-25 05:21:36,033 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 05:21:36,034 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 05:21:36,049 - bot - INFO - [PIPELINE] System prompt: 8671 chars (version=v4)
+2026-02-25 05:21:36,050 - bot - INFO - [PIPELINE] Greeting will be skipped (reconnect with history)
+2026-02-25 05:21:36,050 - bot - INFO - [TEXT_INJECT] Registered injector for session 4ade3eee-aee1-485d-8c27-762891c75f06
+2026-02-25 05:21:36,050 - bot - INFO - [PIPELINE] text_and_audio mode: text synced with TTS audio
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking Pipeline#0::Source -> FastAPIWebsocketInputTransport#0
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking FastAPIWebsocketInputTransport#0 -> DeepgramSTTService#0
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking DeepgramSTTService#0 -> TextInputInjector
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextInputInjector -> UserTranscriptForwarder
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking UserTranscriptForwarder -> STTClarityGate
+2026-02-25 05:21:36.051 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking STTClarityGate -> LLMUserAggregator#0
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking LLMUserAggregator#0 -> OpenAILLMService#0
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking OpenAILLMService#0 -> ActionTagFilter
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking ActionTagFilter -> PipelineInstrumentor
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking PipelineInstrumentor -> GreetingProcessor
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking GreetingProcessor -> TextStreamForwarder
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextStreamForwarder -> ElevenLabsTTSService#0
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking ElevenLabsTTSService#0 -> TextAudioSyncNotifier
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextAudioSyncNotifier -> FastAPIWebsocketOutputTransport#0
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking FastAPIWebsocketOutputTransport#0 -> LLMAssistantAggregator#0
+2026-02-25 05:21:36.052 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking LLMAssistantAggregator#0 -> Pipeline#0::Sink
+2026-02-25 05:21:36,053 - bot - INFO - [PIPELINE] Interruption guard: require 2 words before barge-in (prevents echo false-positives)
+2026-02-25 05:21:36.053 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking PipelineTask#0::Source -> Pipeline#0
+2026-02-25 05:21:36.053 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking Pipeline#0 -> PipelineTask#0::Sink
+2026-02-25 05:21:36.054 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#0 started running PipelineTask#0
+2026-02-25 05:21:36.055 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:602 - PipelineTask#0: Starting. Waiting for StartFrame#0 to reach the end of the pipeline...
+2026-02-25 05:21:36.056 | DEBUG    | pipecat.audio.vad.vad_analyzer:set_params:156 - Setting VAD params to: confidence=0.5 start_secs=0.2 stop_secs=1.0 min_volume=0.4
+2026-02-25 05:21:36.056 | DEBUG    | pipecat.services.deepgram.stt:_connect:216 - Connecting to Deepgram
+2026-02-25 05:21:36,058 - bot - INFO - Pipecat client connected
+2026-02-25 05:21:36,517 - websockets.client - DEBUG - = connection is CONNECTING
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > GET /v1/listen?channels=1&encoding=linear16&interim_results=true&language=en&model=nova-3-general&punctuate=true&profanity_filter=true&smart_format=true&vad_events=false&sample_rate=16000 HTTP/1.1
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Host: api.deepgram.com
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Upgrade: websocket
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Connection: Upgrade
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Sec-WebSocket-Key: O1p44pfxiZ3x/jBXztFVOA==
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Sec-WebSocket-Version: 13
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Accept: application/json
+2026-02-25 05:21:37,258 - websockets.client - DEBUG - > Authorization: Token 086dbbcaca164980748f91e119ea003e31c99b23
+2026-02-25 05:21:37,259 - websockets.client - DEBUG - > User-Agent: @deepgram/sdk/v4.7.0 python/12.12
+2026-02-25 05:21:37,259 - websockets.client - DEBUG - > User-Agent: Python/3.12 websockets/14.0
+INFO:     127.0.0.1:36212 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < HTTP/1.1 101 Switching Protocols
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < connection: upgrade
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < upgrade: websocket
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < sec-websocket-accept: 973FAQhEp9BSioY4p1rnM/YaaN0=
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < dg-project-id: ad0b48fa-eb85-4b54-a350-8a83c3d30a86
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < vary: origin, access-control-request-method, access-control-request-headers
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < access-control-allow-credentials: true
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < access-control-expose-headers: dg-model-name,dg-model-uuid,dg-char-count,dg-request-id,dg-project-id,dg-error,dg-breaks-applied,dg-pronunciations-applied,dg-pronunciation-warnings
+2026-02-25 05:21:37,577 - websockets.client - DEBUG - < dg-request-id: b6f3ae2e-c7de-4e22-8101-062ee441ab98
+2026-02-25 05:21:37,578 - websockets.client - DEBUG - < date: Wed, 25 Feb 2026 05:21:36 GMT
+2026-02-25 05:21:37,578 - websockets.client - DEBUG - = connection is OPEN
+2026-02-25 05:21:37.578 | DEBUG    | pipecat.services.deepgram.stt:_connect:243 - DeepgramSTTService#0: Websocket connection initialized: {"headers": {'dg-project-id': 'ad0b48fa-eb85-4b54-a350-8a83c3d30a86', 'dg-request-id': 'b6f3ae2e-c7de-4e22-8101-062ee441ab98'}}
+2026-02-25 05:21:37,579 - bot - INFO - [TEXT_INJECT] Poll loop started for session 4ade3eee-aee1-485d-8c27-762891c75f06
+2026-02-25 05:21:37,580 - bot - INFO - [GREETING] Skipped (reconnect with existing conversation)
+2026-02-25 05:21:37.580 | DEBUG    | pipecat.services.elevenlabs.tts:_connect_websocket:505 - Connecting to ElevenLabs
+2026-02-25 05:21:37,656 - websockets.client - DEBUG - = connection is CONNECTING
+2026-02-25 05:21:37,763 - websockets.client - DEBUG - > GET /v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/multi-stream-input?model_id=eleven_multilingual_v2&output_format=pcm_24000&auto_mode=true HTTP/1.1
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Host: api.elevenlabs.io
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Upgrade: websocket
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Connection: Upgrade
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Sec-WebSocket-Key: rFHWh4QqVr94kRrRuOEgEw==
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Sec-WebSocket-Version: 13
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > xi-api-key: sk_f84c2e61bcef054d97552a0bc86ac1fb033a7cecfeb3ef06
+2026-02-25 05:21:37,764 - websockets.client - DEBUG - > User-Agent: Python/3.12 websockets/14.0
+2026-02-25 05:21:37,864 - websockets.client - DEBUG - < HTTP/1.1 101 Switching Protocols
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Sec-WebSocket-Accept: 5UmDetG4ccVp8fR45QG7qG9SEE0=
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < date: Wed, 25 Feb 2026 05:21:36 GMT
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < server: uvicorn
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < X-Trace-ID: a988f4d1d42490a9cad70f361b4409b2
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < X-Region: asia-southeast1
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Via: 1.1 google
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Upgrade: websocket
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Connection: Upgrade
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Strict-Transport-Security: max-age=1800;
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - < Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+2026-02-25 05:21:37,865 - websockets.client - DEBUG - = connection is OPEN
+2026-02-25 05:21:37.866 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:605 - PipelineTask#0: StartFrame#0 reached the end of the pipeline, pipeline is now ready.
+2026-02-25 05:21:42,598 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     connection closed
+2026-02-25 05:21:46,432 - bot - INFO - Pipecat client disconnected
+2026-02-25 05:21:46.432 | DEBUG    | pipecat.pipeline.task:_cancel:530 - Cancelling pipeline task PipelineTask#0
+2026-02-25 05:21:46.432 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_end:624 - PipelineTask#0: Closing. Waiting for CancelFrame#0(reason: None) to reach the end of the pipeline...
+2026-02-25 05:21:46.433 | DEBUG    | pipecat.services.deepgram.stt:_disconnect:247 - Disconnecting from Deepgram
+2026-02-25 05:21:46,433 - websockets.client - DEBUG - > TEXT '{"type": "CloseStream"}' [23 bytes]
+2026-02-25 05:21:46,735 - websockets.client - DEBUG - < TEXT '{"type":"Metadata","transaction_key":"deprecate...tion":0.0,"channels":0}' [243 bytes]
+2026-02-25 05:21:46,735 - websockets.client - DEBUG - < CLOSE 1000 (OK) [2 bytes]
+2026-02-25 05:21:46,735 - websockets.client - DEBUG - > CLOSE 1000 (OK) [2 bytes]
+2026-02-25 05:21:46,736 - websockets.client - DEBUG - = connection is CLOSING
+2026-02-25 05:21:46,741 - websockets.client - DEBUG - < EOF
+2026-02-25 05:21:46,741 - websockets.client - DEBUG - > EOF
+2026-02-25 05:21:46,742 - websockets.client - DEBUG - = connection is CLOSED
+2026-02-25 05:21:46,742 - websockets.client - DEBUG - x closing TCP connection
+2026-02-25 05:21:46.938 | DEBUG    | pipecat.services.elevenlabs.tts:_disconnect_websocket:547 - Disconnecting from ElevenLabs
+2026-02-25 05:21:46,938 - websockets.client - DEBUG - > CLOSE 1000 (OK) [2 bytes]
+2026-02-25 05:21:46,938 - websockets.client - DEBUG - = connection is CLOSING
+2026-02-25 05:21:47,062 - websockets.client - DEBUG - < CLOSE 1000 (OK) [2 bytes]
+2026-02-25 05:21:47,064 - websockets.client - DEBUG - < EOF
+2026-02-25 05:21:47,064 - websockets.client - DEBUG - > EOF
+2026-02-25 05:21:47,064 - websockets.client - DEBUG - = connection is CLOSED
+2026-02-25 05:21:47,064 - websockets.client - DEBUG - x closing TCP connection
+2026-02-25 05:21:47.066 | DEBUG    | pipecat.services.elevenlabs.tts:_disconnect_websocket:552 - Disconnected from ElevenLabs
+2026-02-25 05:21:47.067 | DEBUG    | pipecat.pipeline.task:wait_for_cancel:615 - PipelineTask#0: CancelFrame#0(reason: None) reached the end of the pipeline.
+2026-02-25 05:21:47,068 - bot - INFO - [TEXT_INJECT] Poll loop ended for session 4ade3eee-aee1-485d-8c27-762891c75f06
+2026-02-25 05:21:47.069 | DEBUG    | pipecat.pipeline.task:run:495 - Pipeline task PipelineTask#0 is finishing...
+2026-02-25 05:21:47.069 | WARNING  | pipecat.pipeline.task:_print_dangling_tasks:878 - Dangling tasks detected: ['TextInputInjector::__input_frame_task_handler']
+2026-02-25 05:21:47.069 | DEBUG    | pipecat.pipeline.task:run:500 - Pipeline task PipelineTask#0 has finished
+2026-02-25 05:21:47.069 | DEBUG    | pipecat.pipeline.runner:run:95 - Runner PipelineRunner#0 finished running PipelineTask#0
+2026-02-25 05:21:47,070 - bot - INFO - [TEXT_INJECT] Unregistered injector for session 4ade3eee-aee1-485d-8c27-762891c75f06
+2026-02-25 05:21:47,070 - bot - INFO - Bot session ended
+2026-02-25 05:21:47,070 - __main__ - INFO - [METRICS] voice_session_end | mode=tutor | session=4ade3eee... | room=tutor | duration=11.6s
+INFO:     127.0.0.1:53848 - "GET /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:53930 - "GET /health HTTP/1.1" 200 OK
+INFO:     ('172.18.0.1', 53932) - "WebSocket /ws" [accepted]
+2026-02-25 05:21:54,461 - __main__ - INFO - WebSocket connection accepted
+INFO:     connection open
+2026-02-25 05:21:54,466 - __main__ - INFO - Received client config message
+2026-02-25 05:21:54,467 - __main__ - INFO - Sent session_id to client: 247cc4d5-fde2-46ec-87eb-ce660990028a
+2026-02-25 05:21:54,467 - __main__ - INFO - [TUTOR] STT language hints enforced: ['en'] (registered_lang=en(default))
+2026-02-25 05:21:54,467 - bot - INFO - Creating pipeline (mode=text_and_audio)
+2026-02-25 05:21:54.467 | DEBUG    | pipecat.audio.vad.silero:__init__:147 - Loading Silero VAD model...
+2026-02-25 05:21:54.558 | DEBUG    | pipecat.audio.vad.silero:__init__:169 - Loaded Silero VAD
+2026-02-25 05:21:54,558 - bot - INFO - Creating STT service: Deepgram (language=en)
+2026-02-25 05:21:54,559 - bot - INFO - Creating TTS service: ElevenLabs (voice_gender=female)
+2026-02-25 05:21:54,559 - services.elevenlabs_tts - INFO - Creating ElevenLabs TTS: voice=Rachel - Calm & Clear (21m00Tcm4TlvDq8ikWAM), model=eleven_multilingual_v2
+2026-02-25 05:21:54,560 - services.elevenlabs_tts - INFO - ElevenLabs voice params: stability=0.75, similarity=0.85, style=0.0
+2026-02-25 05:21:54,560 - bot - INFO - Creating LLM service: groq (model=openai/gpt-oss-120b, base_url=https://api.groq.com/openai/v1)
+2026-02-25 05:21:54,560 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 05:21:54,561 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 05:21:54,576 - bot - INFO - [PIPELINE] System prompt: 8671 chars (version=v4)
+2026-02-25 05:21:54,579 - bot - INFO - [PIPELINE] Greeting will be skipped (reconnect with history)
+2026-02-25 05:21:54,580 - bot - INFO - [TEXT_INJECT] Registered injector for session 247cc4d5-fde2-46ec-87eb-ce660990028a
+2026-02-25 05:21:54,580 - bot - INFO - [PIPELINE] text_and_audio mode: text synced with TTS audio
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking Pipeline#2::Source -> FastAPIWebsocketInputTransport#1
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking FastAPIWebsocketInputTransport#1 -> DeepgramSTTService#1
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking DeepgramSTTService#1 -> TextInputInjector
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextInputInjector -> UserTranscriptForwarder
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking UserTranscriptForwarder -> STTClarityGate
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking STTClarityGate -> LLMUserAggregator#1
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking LLMUserAggregator#1 -> OpenAILLMService#1
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking OpenAILLMService#1 -> ActionTagFilter
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking ActionTagFilter -> PipelineInstrumentor
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking PipelineInstrumentor -> GreetingProcessor
+2026-02-25 05:21:54.581 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking GreetingProcessor -> TextStreamForwarder
+2026-02-25 05:21:54.582 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextStreamForwarder -> ElevenLabsTTSService#1
+2026-02-25 05:21:54.582 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking ElevenLabsTTSService#1 -> TextAudioSyncNotifier
+2026-02-25 05:21:54.582 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking TextAudioSyncNotifier -> FastAPIWebsocketOutputTransport#1
+2026-02-25 05:21:54.582 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking FastAPIWebsocketOutputTransport#1 -> LLMAssistantAggregator#1
+2026-02-25 05:21:54.582 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking LLMAssistantAggregator#1 -> Pipeline#2::Sink
+2026-02-25 05:21:54,582 - bot - INFO - [PIPELINE] Interruption guard: require 2 words before barge-in (prevents echo false-positives)
+2026-02-25 05:21:54.583 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking PipelineTask#1::Source -> Pipeline#2
+2026-02-25 05:21:54.583 | DEBUG    | pipecat.processors.frame_processor:link:532 - Linking Pipeline#2 -> PipelineTask#1::Sink
+2026-02-25 05:21:54.583 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#1 started running PipelineTask#1
+2026-02-25 05:21:54.584 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:602 - PipelineTask#1: Starting. Waiting for StartFrame#1 to reach the end of the pipeline...
+2026-02-25 05:21:54.585 | DEBUG    | pipecat.audio.vad.vad_analyzer:set_params:156 - Setting VAD params to: confidence=0.5 start_secs=0.2 stop_secs=1.0 min_volume=0.4
+2026-02-25 05:21:54.585 | DEBUG    | pipecat.services.deepgram.stt:_connect:216 - Connecting to Deepgram
+2026-02-25 05:21:54,586 - bot - INFO - Pipecat client connected
+2026-02-25 05:21:55,132 - websockets.client - DEBUG - = connection is CONNECTING
+2026-02-25 05:21:58,258 - websockets.client - DEBUG - > GET /v1/listen?channels=1&encoding=linear16&interim_results=true&language=en&model=nova-3-general&punctuate=true&profanity_filter=true&smart_format=true&vad_events=false&sample_rate=16000 HTTP/1.1
+2026-02-25 05:21:58,258 - websockets.client - DEBUG - > Host: api.deepgram.com
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Upgrade: websocket
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Connection: Upgrade
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Sec-WebSocket-Key: IE9lmWnKb7E6+EUNgm68og==
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Sec-WebSocket-Version: 13
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Accept: application/json
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > Authorization: Token 086dbbcaca164980748f91e119ea003e31c99b23
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > User-Agent: @deepgram/sdk/v4.7.0 python/12.12
+2026-02-25 05:21:58,259 - websockets.client - DEBUG - > User-Agent: Python/3.12 websockets/14.0
+2026-02-25 05:21:53,755 - websockets.client - DEBUG - < HTTP/1.1 101 Switching Protocols
+2026-02-25 05:21:53,755 - websockets.client - DEBUG - < connection: upgrade
+2026-02-25 05:21:53,755 - websockets.client - DEBUG - < upgrade: websocket
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < sec-websocket-accept: WdHUm53is3Chzgz6IM/GDFtKNhg=
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < dg-project-id: ad0b48fa-eb85-4b54-a350-8a83c3d30a86
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < vary: origin, access-control-request-method, access-control-request-headers
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < access-control-allow-credentials: true
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < access-control-expose-headers: dg-model-name,dg-model-uuid,dg-additional-model-uuids,dg-char-count,dg-request-id,dg-project-id,dg-error,dg-breaks-applied,dg-pronunciations-applied,dg-pronunciation-warnings
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < dg-request-id: a727e732-244f-4f0e-b37d-f4071a30cbc9
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - < date: Wed, 25 Feb 2026 05:21:53 GMT
+2026-02-25 05:21:53,756 - websockets.client - DEBUG - = connection is OPEN
+2026-02-25 05:21:53.757 | DEBUG    | pipecat.services.deepgram.stt:_connect:243 - DeepgramSTTService#1: Websocket connection initialized: {"headers": {'dg-project-id': 'ad0b48fa-eb85-4b54-a350-8a83c3d30a86', 'dg-request-id': 'a727e732-244f-4f0e-b37d-f4071a30cbc9'}}
+2026-02-25 05:21:53,758 - bot - INFO - [TEXT_INJECT] Poll loop started for session 247cc4d5-fde2-46ec-87eb-ce660990028a
+2026-02-25 05:21:53,759 - bot - INFO - [GREETING] Skipped (reconnect with existing conversation)
+2026-02-25 05:21:53.760 | DEBUG    | pipecat.services.elevenlabs.tts:_connect_websocket:505 - Connecting to ElevenLabs
+2026-02-25 05:21:53,805 - websockets.client - DEBUG - = connection is CONNECTING
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > GET /v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/multi-stream-input?model_id=eleven_multilingual_v2&output_format=pcm_24000&auto_mode=true HTTP/1.1
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Host: api.elevenlabs.io
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Upgrade: websocket
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Connection: Upgrade
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Sec-WebSocket-Key: 0WwJpgrYr489x1bLdpShoQ==
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Sec-WebSocket-Version: 13
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > xi-api-key: sk_f84c2e61bcef054d97552a0bc86ac1fb033a7cecfeb3ef06
+2026-02-25 05:21:53,914 - websockets.client - DEBUG - > User-Agent: Python/3.12 websockets/14.0
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < HTTP/1.1 101 Switching Protocols
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Sec-WebSocket-Accept: K/DMPkV23x0z/WEbaFCIKwtGKM4=
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < date: Wed, 25 Feb 2026 05:21:53 GMT
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < server: uvicorn
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < X-Trace-ID: dff95dfbd06a76e10fea76f4377550d7
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < X-Region: asia-southeast1
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Via: 1.1 google
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Upgrade: websocket
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Connection: Upgrade
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Strict-Transport-Security: max-age=1800;
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - < Alt-Svc: h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
+2026-02-25 05:21:54,022 - websockets.client - DEBUG - = connection is OPEN
+2026-02-25 05:21:54.024 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:605 - PipelineTask#1: StartFrame#1 reached the end of the pipeline, pipeline is now ready.
+INFO:     127.0.0.1:36088 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:21:58,777 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:03,796 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:04,026 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+INFO:     127.0.0.1:41352 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:08,821 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:13,761 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:13,762 - websockets.client - DEBUG - > PING 95 d9 a2 c1 [binary, 4 bytes]
+2026-02-25 05:22:13,839 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:14,033 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:14,033 - websockets.client - DEBUG - > PING 27 df 48 93 [binary, 4 bytes]
+2026-02-25 05:22:14,034 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:22:14,151 - websockets.client - DEBUG - < PONG 27 df 48 93 [binary, 4 bytes]
+2026-02-25 05:22:14,151 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:22:14,172 - websockets.client - DEBUG - < PONG 95 d9 a2 c1 [binary, 4 bytes]
+2026-02-25 05:22:14,172 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:44852 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:18,856 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:26,085 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:21,196 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+INFO:     127.0.0.1:46144 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:26,072 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:30,926 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:30,926 - websockets.client - DEBUG - > PING 10 36 b7 07 [binary, 4 bytes]
+2026-02-25 05:22:31,093 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:31,196 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:31,196 - websockets.client - DEBUG - > PING ee a7 74 77 [binary, 4 bytes]
+2026-02-25 05:22:31,198 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:22:31,301 - websockets.client - DEBUG - < PONG ee a7 74 77 [binary, 4 bytes]
+2026-02-25 05:22:31,301 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:22:31,376 - websockets.client - DEBUG - < PONG 10 36 b7 07 [binary, 4 bytes]
+2026-02-25 05:22:31,376 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:39446 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:36,099 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:41,124 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:41,200 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+INFO:     127.0.0.1:36286 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:46,143 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:48,290 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:48,291 - websockets.client - DEBUG - > PING df ca 12 30 [binary, 4 bytes]
+2026-02-25 05:22:48,519 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:48,564 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:22:48,564 - websockets.client - DEBUG - > PING d9 2b a6 b1 [binary, 4 bytes]
+2026-02-25 05:22:48,565 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:22:48,671 - websockets.client - DEBUG - < PONG d9 2b a6 b1 [binary, 4 bytes]
+2026-02-25 05:22:48,671 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:22:48,720 - websockets.client - DEBUG - < PONG df ca 12 30 [binary, 4 bytes]
+2026-02-25 05:22:48,720 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:42640 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:22:53,534 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:58,560 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:22:58,565 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+INFO:     127.0.0.1:45196 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:03,580 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:08,293 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:08,293 - websockets.client - DEBUG - > PING 68 e5 82 6e [binary, 4 bytes]
+2026-02-25 05:23:08,567 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:08,567 - websockets.client - DEBUG - > PING 5f 44 8f ba [binary, 4 bytes]
+2026-02-25 05:23:08,568 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:08,603 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:08,669 - websockets.client - DEBUG - < PONG 5f 44 8f ba [binary, 4 bytes]
+2026-02-25 05:23:08,670 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:23:08,727 - websockets.client - DEBUG - < PONG 68 e5 82 6e [binary, 4 bytes]
+2026-02-25 05:23:08,727 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:40374 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:13,614 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:15,849 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:15,908 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:58820 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:20,919 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:25,574 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:25,575 - websockets.client - DEBUG - > PING 62 8a 52 23 [binary, 4 bytes]
+2026-02-25 05:23:25,851 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:25,852 - websockets.client - DEBUG - > PING 95 ca 04 ef [binary, 4 bytes]
+2026-02-25 05:23:25,852 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:25,931 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:25,953 - websockets.client - DEBUG - < PONG 95 ca 04 ef [binary, 4 bytes]
+2026-02-25 05:23:25,953 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:23:26,014 - websockets.client - DEBUG - < PONG 62 8a 52 23 [binary, 4 bytes]
+2026-02-25 05:23:26,014 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:38044 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:30,949 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:35,854 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:35,956 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:35352 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:40,978 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:42,883 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:42,883 - websockets.client - DEBUG - > PING 80 ce 8b f3 [binary, 4 bytes]
+2026-02-25 05:23:43,157 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:23:43,157 - websockets.client - DEBUG - > PING d4 25 b1 19 [binary, 4 bytes]
+2026-02-25 05:23:43,160 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:43,256 - websockets.client - DEBUG - < PONG d4 25 b1 19 [binary, 4 bytes]
+2026-02-25 05:23:43,257 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:23:43,310 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:43,314 - websockets.client - DEBUG - < PONG 80 ce 8b f3 [binary, 4 bytes]
+2026-02-25 05:23:43,315 - websockets.client - DEBUG - % received keepalive pong
+INFO:     127.0.0.1:37692 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:48,327 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:23:53,164 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:23:53,348 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:55744 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:23:58,365 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:24:02,887 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:24:02,888 - websockets.client - DEBUG - > PING 69 12 b1 80 [binary, 4 bytes]
+2026-02-25 05:24:03,159 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:24:03,160 - websockets.client - DEBUG - > PING fa fc 7a 71 [binary, 4 bytes]
+2026-02-25 05:24:03,165 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:24:03,263 - websockets.client - DEBUG - < PONG fa fc 7a 71 [binary, 4 bytes]
+2026-02-25 05:24:03,263 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:24:03,304 - websockets.client - DEBUG - < PONG 69 12 b1 80 [binary, 4 bytes]
+2026-02-25 05:24:03,304 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:24:03,373 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:36352 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:24:08,395 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:24:10,429 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:24:10,681 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:53444 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:24:15,699 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+2026-02-25 05:24:20,153 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:24:20,153 - websockets.client - DEBUG - > PING e9 64 21 ed [binary, 4 bytes]
+2026-02-25 05:24:20,427 - websockets.client - DEBUG - % sending keepalive ping
+2026-02-25 05:24:20,427 - websockets.client - DEBUG - > PING 46 e5 2d e2 [binary, 4 bytes]
+2026-02-25 05:24:20,430 - websockets.client - DEBUG - > TEXT '{"text": ""}' [12 bytes]
+2026-02-25 05:24:20,543 - websockets.client - DEBUG - < PONG 46 e5 2d e2 [binary, 4 bytes]
+2026-02-25 05:24:20,543 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:24:20,583 - websockets.client - DEBUG - < PONG e9 64 21 ed [binary, 4 bytes]
+2026-02-25 05:24:20,583 - websockets.client - DEBUG - % received keepalive pong
+2026-02-25 05:24:20,723 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]
+INFO:     127.0.0.1:38706 - "GET /health HTTP/1.1" 200 OK
+2026-02-25 05:24:25,738 - websockets.client - DEBUG - > TEXT '{"type": "KeepAlive"}' [21 bytes]

@@ -1,0 +1,143 @@
+2026-02-25 04:53:49.560 | INFO     | pipecat:<module>:14 - ᓚᘏᗢ Pipecat 0.0.98 (Python 3.12.12 (main, Feb 24 2026, 19:45:37) [GCC 14.2.0]) ᓚᘏᗢ
+2026-02-25 04:54:09,550 - provider_config - INFO - [CONFIG] LLM resolved: LLMConfig(provider='groq', model='openai/gpt-oss-120b', base_url='https://api.groq.com/openai/v1', is_vllm=False)
+2026-02-25 04:54:09,550 - provider_config - INFO - [CONFIG] TTS resolved: provider=elevenlabs, sample_rate=24000
+2026-02-25 04:54:09,550 - provider_config - INFO - [CONFIG] STT resolved: provider=deepgram, language_hints=en,hi,ta
+2026-02-25 04:54:09,641 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 04:54:09,642 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 04:54:09,650 - translator - INFO - Translator initialized: model=openai/gpt-oss-120b, base_url=https://api.groq.com/openai/v1
+2026-02-25 04:54:09,650 - classroom - INFO - Classroom translator initialized
+2026-02-25 04:54:09,653 - services.classroom_tts - INFO - ClassroomTTS initialized: provider=elevenlabs, voice=2zRM7PkgwBPiau2jvVXc, model=eleven_multilingual_v2, sr=24000
+2026-02-25 04:54:09,653 - classroom - INFO - Classroom TTS initialized (provider from TTS_PROVIDER)
+2026-02-25 04:54:09,653 - httpx - DEBUG - load_ssl_context verify=True cert=None trust_env=True http2=False
+2026-02-25 04:54:09,654 - httpx - DEBUG - load_verify_locations cafile='/usr/local/lib/python3.12/site-packages/certifi/cacert.pem'
+2026-02-25 04:54:09,663 - classroom - INFO - Classroom LLM client initialized (model=openai/gpt-oss-120b)
+2026-02-25 04:54:09,663 - classroom - INFO - [CLASSROOM] Default permanent room created: default (Mira Classroom)
+2026-02-25 04:54:09,714 - __main__ - INFO - Starting server with HTTP on port 7860
+2026-02-25 04:54:09,715 - asyncio - DEBUG - Using selector: EpollSelector
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+2026-02-25 04:54:09,733 - __main__ - INFO - Starting MiraVoiceAI Pipecat server...
+2026-02-25 04:54:09,735 - aiosqlite - DEBUG - executing <function connect.<locals>.connector at 0x77b26f29e700>
+2026-02-25 04:54:09,737 - aiosqlite - DEBUG - operation <function connect.<locals>.connector at 0x77b26f29e700> completed
+2026-02-25 04:54:09,738 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA journal_mode=WAL', [])
+2026-02-25 04:54:09,739 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA journal_mode=WAL', []) completed
+2026-02-25 04:54:09,740 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA foreign_keys=ON', [])
+2026-02-25 04:54:09,746 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA foreign_keys=ON', []) completed
+2026-02-25 04:54:09,747 - aiosqlite - DEBUG - executing functools.partial(<built-in method executescript of sqlite3.Connection object at 0x77b26f36f970>, "\nCREATE TABLE IF NOT EXISTS sessions (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL,\n    room_name TEXT NOT NULL DEFAULT '',\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    speaker_ids TEXT DEFAULT '[]',\n    participant_count INTEGER DEFAULT 0,\n    message_count INTEGER DEFAULT 0,\n    summary TEXT,\n    quiz_json TEXT\n);\n\nCREATE TABLE IF NOT EXISTS messages (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    role TEXT NOT NULL,\n    speaker_id TEXT,\n    speaker_name TEXT,\n    content TEXT NOT NULL DEFAULT '',\n    original_language TEXT DEFAULT 'en',\n    translations TEXT DEFAULT '{}',\n    timestamp REAL NOT NULL,\n    reaction_counts TEXT DEFAULT '{}',\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS hand_raises (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'pending',\n    question_preview TEXT,\n    raised_at REAL NOT NULL,\n    resolved_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS reactions (\n    id TEXT PRIMARY KEY,\n    message_id TEXT NOT NULL,\n    session_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    emoji TEXT NOT NULL,\n    timestamp REAL NOT NULL,\n    FOREIGN KEY (message_id) REFERENCES messages(id),\n    FOREIGN KEY (session_id) REFERENCES sessions(id),\n    UNIQUE(message_id, user_id, emoji)\n);\n\nCREATE TABLE IF NOT EXISTS recordings (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    filename TEXT NOT NULL,\n    duration_secs REAL DEFAULT 0.0,\n    size_bytes INTEGER DEFAULT 0,\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS teacher_role_requests (\n    id TEXT PRIMARY KEY,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    user_email TEXT NOT NULL DEFAULT '',\n    purpose TEXT,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at REAL NOT NULL,\n    reviewed_at REAL,\n    reviewed_by TEXT,\n    review_note TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);\nCREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);\nCREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_session ON hand_raises(session_id);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_status ON hand_raises(status);\nCREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);\nCREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);\n\n-- ── Persistence tables (rooms, users, memberships) ──\n\nCREATE TABLE IF NOT EXISTS rooms (\n    room_id TEXT PRIMARY KEY,\n    name TEXT NOT NULL DEFAULT 'Classroom',\n    topic TEXT,\n    created_by TEXT,\n    created_by_name TEXT,\n    settings_json TEXT DEFAULT '{}',\n    is_permanent INTEGER DEFAULT 0,\n    room_type TEXT DEFAULT 'teacher_driven',\n    created_at REAL NOT NULL,\n    updated_at REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS user_profiles (\n    user_id TEXT PRIMARY KEY,\n    display_name TEXT NOT NULL,\n    preferred_language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    settings_json TEXT DEFAULT '{}',\n    created_at REAL NOT NULL,\n    last_seen REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS room_members (\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    display_name TEXT NOT NULL,\n    language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    mode TEXT DEFAULT 'text_only',\n    joined_at REAL NOT NULL,\n    last_active REAL NOT NULL,\n    PRIMARY KEY (room_id, user_id),\n    FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE,\n    FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE\n);\n\nCREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);\nCREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);\nCREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_user ON teacher_role_requests(user_id);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_status ON teacher_role_requests(status);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_created_at ON teacher_role_requests(created_at);\n")
+2026-02-25 04:54:09,803 - aiosqlite - DEBUG - operation functools.partial(<built-in method executescript of sqlite3.Connection object at 0x77b26f36f970>, "\nCREATE TABLE IF NOT EXISTS sessions (\n    id TEXT PRIMARY KEY,\n    room_id TEXT NOT NULL,\n    room_name TEXT NOT NULL DEFAULT '',\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    speaker_ids TEXT DEFAULT '[]',\n    participant_count INTEGER DEFAULT 0,\n    message_count INTEGER DEFAULT 0,\n    summary TEXT,\n    quiz_json TEXT\n);\n\nCREATE TABLE IF NOT EXISTS messages (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    role TEXT NOT NULL,\n    speaker_id TEXT,\n    speaker_name TEXT,\n    content TEXT NOT NULL DEFAULT '',\n    original_language TEXT DEFAULT 'en',\n    translations TEXT DEFAULT '{}',\n    timestamp REAL NOT NULL,\n    reaction_counts TEXT DEFAULT '{}',\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS hand_raises (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    status TEXT NOT NULL DEFAULT 'pending',\n    question_preview TEXT,\n    raised_at REAL NOT NULL,\n    resolved_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS reactions (\n    id TEXT PRIMARY KEY,\n    message_id TEXT NOT NULL,\n    session_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    emoji TEXT NOT NULL,\n    timestamp REAL NOT NULL,\n    FOREIGN KEY (message_id) REFERENCES messages(id),\n    FOREIGN KEY (session_id) REFERENCES sessions(id),\n    UNIQUE(message_id, user_id, emoji)\n);\n\nCREATE TABLE IF NOT EXISTS recordings (\n    id TEXT PRIMARY KEY,\n    session_id TEXT NOT NULL,\n    room_id TEXT NOT NULL,\n    filename TEXT NOT NULL,\n    duration_secs REAL DEFAULT 0.0,\n    size_bytes INTEGER DEFAULT 0,\n    started_at REAL NOT NULL,\n    ended_at REAL,\n    FOREIGN KEY (session_id) REFERENCES sessions(id)\n);\n\nCREATE TABLE IF NOT EXISTS teacher_role_requests (\n    id TEXT PRIMARY KEY,\n    user_id TEXT NOT NULL,\n    user_name TEXT NOT NULL DEFAULT '',\n    user_email TEXT NOT NULL DEFAULT '',\n    purpose TEXT,\n    status TEXT NOT NULL DEFAULT 'pending',\n    created_at REAL NOT NULL,\n    reviewed_at REAL,\n    reviewed_by TEXT,\n    review_note TEXT\n);\n\nCREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);\nCREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);\nCREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_session ON hand_raises(session_id);\nCREATE INDEX IF NOT EXISTS idx_hand_raises_status ON hand_raises(status);\nCREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_room ON sessions(room_id);\nCREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);\nCREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);\n\n-- ── Persistence tables (rooms, users, memberships) ──\n\nCREATE TABLE IF NOT EXISTS rooms (\n    room_id TEXT PRIMARY KEY,\n    name TEXT NOT NULL DEFAULT 'Classroom',\n    topic TEXT,\n    created_by TEXT,\n    created_by_name TEXT,\n    settings_json TEXT DEFAULT '{}',\n    is_permanent INTEGER DEFAULT 0,\n    room_type TEXT DEFAULT 'teacher_driven',\n    created_at REAL NOT NULL,\n    updated_at REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS user_profiles (\n    user_id TEXT PRIMARY KEY,\n    display_name TEXT NOT NULL,\n    preferred_language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    settings_json TEXT DEFAULT '{}',\n    created_at REAL NOT NULL,\n    last_seen REAL NOT NULL\n);\n\nCREATE TABLE IF NOT EXISTS room_members (\n    room_id TEXT NOT NULL,\n    user_id TEXT NOT NULL,\n    display_name TEXT NOT NULL,\n    language TEXT DEFAULT 'en',\n    role TEXT DEFAULT 'student',\n    mode TEXT DEFAULT 'text_only',\n    joined_at REAL NOT NULL,\n    last_active REAL NOT NULL,\n    PRIMARY KEY (room_id, user_id),\n    FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE,\n    FOREIGN KEY (user_id) REFERENCES user_profiles(user_id) ON DELETE CASCADE\n);\n\nCREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);\nCREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);\nCREATE INDEX IF NOT EXISTS idx_user_profiles_name ON user_profiles(display_name);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_user ON teacher_role_requests(user_id);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_status ON teacher_role_requests(status);\nCREATE INDEX IF NOT EXISTS idx_teacher_requests_created_at ON teacher_role_requests(created_at);\n") completed
+2026-02-25 04:54:09,804 - aiosqlite - DEBUG - executing functools.partial(<built-in method commit of sqlite3.Connection object at 0x77b26f36f970>)
+2026-02-25 04:54:09,804 - aiosqlite - DEBUG - operation functools.partial(<built-in method commit of sqlite3.Connection object at 0x77b26f36f970>) completed
+2026-02-25 04:54:09,804 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA table_info(rooms)', [])
+2026-02-25 04:54:09,804 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'PRAGMA table_info(rooms)', []) completed
+2026-02-25 04:54:09,804 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x77b26f326e40>)
+2026-02-25 04:54:09,805 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x77b26f326e40>) completed
+2026-02-25 04:54:09,805 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x77b26f326e40>)
+2026-02-25 04:54:09,805 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x77b26f326e40>) completed
+2026-02-25 04:54:09,805 - database - INFO - [DB] Classroom database initialized at /app/data/classroom.db
+2026-02-25 04:54:09,805 - classroom - INFO - [CLASSROOM] Database initialized
+2026-02-25 04:54:09,805 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'SELECT * FROM rooms ORDER BY created_at DESC', [])
+2026-02-25 04:54:09,805 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'SELECT * FROM rooms ORDER BY created_at DESC', []) completed
+2026-02-25 04:54:09,806 - aiosqlite - DEBUG - executing functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x77b26f326e40>)
+2026-02-25 04:54:09,806 - aiosqlite - DEBUG - operation functools.partial(<built-in method fetchall of sqlite3.Cursor object at 0x77b26f326e40>) completed
+2026-02-25 04:54:09,806 - aiosqlite - DEBUG - executing functools.partial(<built-in method close of sqlite3.Cursor object at 0x77b26f326e40>)
+2026-02-25 04:54:09,806 - aiosqlite - DEBUG - operation functools.partial(<built-in method close of sqlite3.Cursor object at 0x77b26f326e40>) completed
+2026-02-25 04:54:09,806 - classroom - INFO - [CLASSROOM] Hydrated 0 rooms from database
+2026-02-25 04:54:09,806 - aiosqlite - DEBUG - executing functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'INSERT INTO rooms (room_id, name, topic, created_by, created_by_name,\n               settings_json, is_permanent, room_type, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               ON CONFLICT(room_id) DO UPDATE SET\n                   name=excluded.name, topic=excluded.topic,\n                   created_by=excluded.created_by, created_by_name=excluded.created_by_name,\n                   settings_json=excluded.settings_json, is_permanent=excluded.is_permanent,\n                   room_type=excluded.room_type, updated_at=excluded.updated_at', ('default', 'Mira Classroom', None, None, None, '{}', 1, 'teacher_driven', 1771995249.806835, 1771995249.806835))
+2026-02-25 04:54:09,807 - aiosqlite - DEBUG - operation functools.partial(<built-in method execute of sqlite3.Connection object at 0x77b26f36f970>, 'INSERT INTO rooms (room_id, name, topic, created_by, created_by_name,\n               settings_json, is_permanent, room_type, created_at, updated_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n               ON CONFLICT(room_id) DO UPDATE SET\n                   name=excluded.name, topic=excluded.topic,\n                   created_by=excluded.created_by, created_by_name=excluded.created_by_name,\n                   settings_json=excluded.settings_json, is_permanent=excluded.is_permanent,\n                   room_type=excluded.room_type, updated_at=excluded.updated_at', ('default', 'Mira Classroom', None, None, None, '{}', 1, 'teacher_driven', 1771995249.806835, 1771995249.806835)) completed
+2026-02-25 04:54:09,807 - aiosqlite - DEBUG - executing functools.partial(<built-in method commit of sqlite3.Connection object at 0x77b26f36f970>)
+2026-02-25 04:54:09,810 - aiosqlite - DEBUG - operation functools.partial(<built-in method commit of sqlite3.Connection object at 0x77b26f36f970>) completed
+2026-02-25 04:54:09,810 - database - INFO - [DB] Room saved: default (Mira Classroom) type=teacher_driven
+2026-02-25 04:54:09,810 - classroom - INFO - [CLASSROOM] Persisted default room to DB: default
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:7860 (Press CTRL+C to quit)
+INFO:     127.0.0.1:33524 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58302 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46278 - "GET /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:56946 - "GET / HTTP/1.1" 404 Not Found
+INFO:     172.18.0.1:56952 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55830 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40392 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55584 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53328 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37156 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43988 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57992 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59788 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37590 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36668 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42228 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51612 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36040 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46206 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34218 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40544 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40440 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39226 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36066 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32796 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59710 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53108 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50124 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43634 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39124 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56120 - "GET /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42936 - "OPTIONS /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42936 - "GET /health HTTP/1.1" 200 OK
+INFO:     ('172.18.0.1', 42946) - "WebSocket /ws" [accepted]
+2026-02-25 04:58:40,601 - __main__ - INFO - WebSocket connection accepted
+INFO:     connection open
+2026-02-25 04:58:40,607 - __main__ - INFO - Received client config message
+2026-02-25 04:58:40,608 - __main__ - INFO - Sent session_id to client: de2b9969-54fb-4b9f-b372-b99d267be39b
+2026-02-25 04:58:40,608 - __main__ - INFO - [TUTOR] STT language hints enforced: ['en'] (registered_lang=en(default))
+2026-02-25 04:58:40,608 - bot - INFO - Creating pipeline (mode=text_and_audio)
+2026-02-25 04:58:40.609 | DEBUG    | pipecat.audio.vad.silero:__init__:147 - Loading Silero VAD model...
+2026-02-25 04:58:40.798 | DEBUG    | pipecat.audio.vad.silero:__init__:169 - Loaded Silero VAD
+2026-02-25 04:58:40.802 | ERROR    | pipecat.services.deepgram.stt:<module>:42 - Exception: No module named 'deepgram'
+2026-02-25 04:58:40.802 | ERROR    | pipecat.services.deepgram.stt:<module>:43 - In order to use Deepgram, you need to `pip install pipecat-ai[deepgram]`.
+2026-02-25 04:58:40,802 - __main__ - ERROR - WebSocket error: Missing module: No module named 'deepgram'
+2026-02-25 04:58:40,802 - __main__ - INFO - [METRICS] voice_session_end | mode=tutor | session=de2b9969... | room=tutor | duration=0.2s
+INFO:     127.0.0.1:34974 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50814 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56328 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39612 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34132 - "GET /health HTTP/1.1" 200 OK
+INFO:     172.18.0.1:42498 - "GET /health HTTP/1.1" 200 OK
+INFO:     ('172.18.0.1', 42514) - "WebSocket /ws" [accepted]
+2026-02-25 04:59:26,126 - __main__ - INFO - WebSocket connection accepted
+INFO:     connection open
+2026-02-25 04:59:26,134 - __main__ - INFO - Received client config message
+2026-02-25 04:59:26,134 - __main__ - INFO - Sent session_id to client: 7ae486de-5cc2-4cc9-bdba-771783deeb5e
+2026-02-25 04:59:26,135 - __main__ - INFO - [TUTOR] STT language hints enforced: ['en'] (registered_lang=en(default))
+2026-02-25 04:59:26,135 - bot - INFO - Creating pipeline (mode=text_and_audio)
+2026-02-25 04:59:26.135 | DEBUG    | pipecat.audio.vad.silero:__init__:147 - Loading Silero VAD model...
+2026-02-25 04:59:26.227 | DEBUG    | pipecat.audio.vad.silero:__init__:169 - Loaded Silero VAD
+2026-02-25 04:59:26.230 | ERROR    | pipecat.services.deepgram.stt:<module>:42 - Exception: No module named 'deepgram'
+2026-02-25 04:59:26.230 | ERROR    | pipecat.services.deepgram.stt:<module>:43 - In order to use Deepgram, you need to `pip install pipecat-ai[deepgram]`.
+2026-02-25 04:59:26,230 - __main__ - ERROR - WebSocket error: Missing module: No module named 'deepgram'
+2026-02-25 04:59:26,230 - __main__ - INFO - [METRICS] voice_session_end | mode=tutor | session=7ae486de... | room=tutor | duration=0.1s
+INFO:     127.0.0.1:40246 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50152 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44836 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34806 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53330 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51752 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34018 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44216 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47692 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54506 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36620 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54064 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60454 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57674 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36562 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47518 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40608 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40664 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52934 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53180 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51762 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47174 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47038 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55988 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57272 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53482 - "GET /health HTTP/1.1" 200 OK
