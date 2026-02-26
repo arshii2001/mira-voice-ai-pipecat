@@ -240,18 +240,15 @@ async def chat_completion(req: ChatRequest):
     Text chat endpoint — proxies to the same LLM that Pipecat uses for voice.
     Supports streaming (SSE) so the frontend can show tokens as they arrive.
     """
-    api_key = LLM_API_KEY
-    base_url = LLM_BASE_URL
-    model = req.model or LLM_MODEL
+    # Resolve config dynamically at request time (ensures latest env vars on Railway)
+    from provider_config import LLM as _llm_cfg
+    api_key = _llm_cfg.api_key
+    base_url = _llm_cfg.base_url
+    model = req.model or _llm_cfg.model
 
     # Guard: empty api_key produces httpx.LocalProtocolError ("Illegal header value b'Bearer '")
-    # This happens on Railway when LLM_API_KEY is not set in the Variables panel.
-    # The .env file is NOT loaded on Railway — all vars must be set in the dashboard.
     if not api_key:
-        logger.error(
-            "[CHAT] LLM_API_KEY is empty — cannot call LLM. "
-            "On Railway: set LLM_API_KEY in the Variables panel."
-        )
+        logger.error("[CHAT] LLM_API_KEY is empty — cannot call LLM.")
         raise HTTPException(
             status_code=500,
             detail="LLM API key not configured. Set LLM_API_KEY in Railway Variables."
@@ -270,7 +267,7 @@ async def chat_completion(req: ChatRequest):
 
     prompt_content = load_system_prompt(version=PROMPT_VERSION, mode=prompt_mode)
 
-    # Inject dynamic student context if available
+    # Inject dynamic student context
     context_lines = []
     if req.user_name:
         context_lines.append(f"Name: {req.user_name}")
@@ -280,8 +277,6 @@ async def chat_completion(req: ChatRequest):
         prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
 
     # Inject curriculum context
-    # For math mode: inject Maths context directly — do NOT check Science first
-    # (Science and Maths share the same numeric topic IDs 1-35, causing collisions)
     if req.topic:
         if prompt_mode == "math-word-problems":
             mm = get_maths_manager()
@@ -289,22 +284,16 @@ async def chat_completion(req: ChatRequest):
             if maths_ctx:
                 prompt_content += "\n\n" + maths_ctx + "\n"
         else:
-            # Non-math topic: try Science curriculum
             from curriculum_manager import get_curriculum_manager
             cm = get_curriculum_manager()
-            curriculum_ctx = None
             if cm.available:
                 curriculum_ctx = cm.get_context_for_topic(req.topic)
-            if curriculum_ctx:
-                prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
+                if curriculum_ctx:
+                    prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
 
-    system_msg = {
-        "role": "system",
-        "content": prompt_content,
-    }
+    system_msg = {"role": "system", "content": prompt_content}
 
-    # Truncate history to last 20 messages to avoid LLM context limit (Groq ~32K tokens)
-    # System prompt is always prepended; only the conversation turns are trimmed.
+    # Truncate history to avoid LLM context limits
     MAX_HISTORY_MESSAGES = 20
     trimmed_messages = req.messages[-MAX_HISTORY_MESSAGES:] if len(req.messages) > MAX_HISTORY_MESSAGES else req.messages
     messages = [system_msg] + [{"role": m.role, "content": m.content} for m in trimmed_messages]
@@ -314,17 +303,18 @@ async def chat_completion(req: ChatRequest):
             t0 = time.time()
             t_first_token = 0.0
             token_count = 0
+            
             async with httpx.AsyncClient(timeout=60.0) as client:
-                from provider_config import LLM as _llm_cfg
                 _json_body = {
                     "model": model,
                     "messages": messages,
                     "stream": True,
-                    "temperature": 0.7,     # locked — prevents output variation from Groq default changes
-                    "max_tokens": 1024,     # prevent runaway responses
+                    "temperature": 0.7,
+                    "max_tokens": 1024,
                 }
                 if _llm_cfg.is_vllm:
                     _json_body["chat_template_kwargs"] = {"enable_thinking": False}
+
                 async with client.stream(
                     "POST",
                     f"{base_url}/chat/completions",
@@ -339,7 +329,8 @@ async def chat_completion(req: ChatRequest):
                             yield line + "\n\n"
                         elif line == "":
                             continue
-            # Record tutor text metrics
+
+            # Metrics
             total_ms = round((time.time() - t0) * 1000, 1)
             ttft_ms = round((t_first_token - t0) * 1000, 1) if t_first_token else 0.0
             tokens_per_sec = round(token_count / ((time.time() - t0) or 1), 1)
@@ -351,20 +342,15 @@ async def chat_completion(req: ChatRequest):
                 "total_ms": total_ms,
                 "stages": [
                     {"name": "llm_ttft", "ms": ttft_ms},
-                    {"name": "llm_stream", "ms": total_ms, "tokens": token_count,
-                     "tok_per_sec": tokens_per_sec},
+                    {"name": "llm_stream", "ms": total_ms, "tokens": token_count, "tok_per_sec": tokens_per_sec},
                 ],
             })
-            logger.info(
-                f"[METRICS][TUTOR] chat_stream | total={total_ms}ms | "
-                f"ttft={ttft_ms}ms | tokens={token_count}"
-            )
+            logger.info(f"[METRICS][TUTOR] chat_stream | total={total_ms}ms | ttft={ttft_ms}ms")
 
         return StreamingResponse(generate(), media_type="text/event-stream")
     else:
         t0 = time.time()
         async with httpx.AsyncClient(timeout=60.0) as client:
-            from provider_config import LLM as _llm_cfg
             _json_body_ns = {
                 "model": model,
                 "messages": messages,
@@ -374,6 +360,7 @@ async def chat_completion(req: ChatRequest):
             }
             if _llm_cfg.is_vllm:
                 _json_body_ns["chat_template_kwargs"] = {"enable_thinking": False}
+
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 json=_json_body_ns,
@@ -386,11 +373,8 @@ async def chat_completion(req: ChatRequest):
                 "query": messages[-1]["content"][:80] if messages else "",
                 "ts": t0,
                 "total_ms": total_ms,
-                "stages": [
-                    {"name": "llm_sync", "ms": total_ms},
-                ],
+                "stages": [{"name": "llm_sync", "ms": total_ms}],
             })
-            logger.info(f"[METRICS][TUTOR] chat_sync | total={total_ms}ms")
             return resp.json()
 
 
