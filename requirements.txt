@@ -1,5 +1,5 @@
 # Pipecat Core (pinned for stable builds)
-pipecat-ai[websocket,openai,silero,elevenlabs,deepgram]==0.0.98
+pipecat-ai[websocket,openai,silero,elevenlabs]==0.0.98
 
 # FastAPI server (must be >=0.115.6 and <0.122.0 for pipecat-ai 0.0.98)
 fastapi==0.115.6
