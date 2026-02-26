@@ -259,48 +259,55 @@ async def chat_completion(req: ChatRequest):
 
     # System prompt for Mira text tutor mode (composed from versioned files)
     prompt_mode = "text"
+    topic_name = req.topic  # default: use topic as-is for STUDENT CONTEXT
     if req.topic:
         mm = get_maths_manager()
-        # If topic exists in Maths manager, switch to math-word-problems mode prompt
-        if mm.get_topic(str(req.topic)):
+        _topic_obj = mm.get_topic(str(req.topic))
+        if _topic_obj:
             prompt_mode = "math-word-problems"
-            
+            # Resolve human-readable name instead of raw index (e.g. "15")
+            topic_name = _topic_obj.get("improved_topic_name") or _topic_obj.get("original_topic") or req.topic
+
     prompt_content = load_system_prompt(version=PROMPT_VERSION, mode=prompt_mode)
 
     # Inject dynamic student context if available
     context_lines = []
     if req.user_name:
         context_lines.append(f"Name: {req.user_name}")
-    if req.topic:
-        context_lines.append(f"Topic: {req.topic}")
+    if topic_name:
+        context_lines.append(f"Topic: {topic_name}")
     if context_lines:
         prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
 
-    # Inject curriculum context (Science)
+    # Inject curriculum context
+    # For math mode: inject Maths context directly — do NOT check Science first
+    # (Science and Maths share the same numeric topic IDs 1-35, causing collisions)
     if req.topic:
-        from curriculum_manager import get_curriculum_manager
-        cm = get_curriculum_manager()
-        # Try Science curriculum first
-        # Try Science curriculum first
-        curriculum_ctx = None
-        if cm.available:
-            curriculum_ctx = cm.get_context_for_topic(req.topic)
-        
-        if curriculum_ctx:
-            prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
-        else:
-            # Try Maths curriculum if Science yield no results
+        if prompt_mode == "math-word-problems":
             mm = get_maths_manager()
             maths_ctx = mm.get_context_for_topic(str(req.topic))
             if maths_ctx:
                 prompt_content += "\n\n" + maths_ctx + "\n"
+        else:
+            # Non-math topic: try Science curriculum
+            from curriculum_manager import get_curriculum_manager
+            cm = get_curriculum_manager()
+            curriculum_ctx = None
+            if cm.available:
+                curriculum_ctx = cm.get_context_for_topic(req.topic)
+            if curriculum_ctx:
+                prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
 
     system_msg = {
         "role": "system",
         "content": prompt_content,
     }
 
-    messages = [system_msg] + [{"role": m.role, "content": m.content} for m in req.messages]
+    # Truncate history to last 20 messages to avoid LLM context limit (Groq ~32K tokens)
+    # System prompt is always prepended; only the conversation turns are trimmed.
+    MAX_HISTORY_MESSAGES = 20
+    trimmed_messages = req.messages[-MAX_HISTORY_MESSAGES:] if len(req.messages) > MAX_HISTORY_MESSAGES else req.messages
+    messages = [system_msg] + [{"role": m.role, "content": m.content} for m in trimmed_messages]
 
     if req.stream:
         async def generate():
@@ -309,7 +316,13 @@ async def chat_completion(req: ChatRequest):
             token_count = 0
             async with httpx.AsyncClient(timeout=60.0) as client:
                 from provider_config import LLM as _llm_cfg
-                _json_body = {"model": model, "messages": messages, "stream": True}
+                _json_body = {
+                    "model": model,
+                    "messages": messages,
+                    "stream": True,
+                    "temperature": 0.7,     # locked — prevents output variation from Groq default changes
+                    "max_tokens": 1024,     # prevent runaway responses
+                }
                 if _llm_cfg.is_vllm:
                     _json_body["chat_template_kwargs"] = {"enable_thinking": False}
                 async with client.stream(
@@ -352,7 +365,13 @@ async def chat_completion(req: ChatRequest):
         t0 = time.time()
         async with httpx.AsyncClient(timeout=60.0) as client:
             from provider_config import LLM as _llm_cfg
-            _json_body_ns = {"model": model, "messages": messages, "stream": False}
+            _json_body_ns = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "temperature": 0.7,
+                "max_tokens": 1024,
+            }
             if _llm_cfg.is_vllm:
                 _json_body_ns["chat_template_kwargs"] = {"enable_thinking": False}
             resp = await client.post(
