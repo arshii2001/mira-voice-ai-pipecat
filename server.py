@@ -111,6 +111,35 @@ def _stt_hints_for_registered_language(lang: Optional[str]) -> list[str]:
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     logger.info("Starting MiraVoiceAI Pipecat server...")
+
+    # ── Startup config check ──────────────────────────────────────────
+    # Logs the status of every critical env var at boot.
+    # On Railway: check the deployment logs for any MISSING entries.
+    # Set all vars in Railway's 'Variables' panel, NOT in .env
+    # (.env is not copied into the Docker image on Railway).
+    from provider_config import LLM, TTS, STT
+    logger.info("[CONFIG CHECK] ── Environment variables at startup ──")
+    logger.info(f"[CONFIG CHECK] LLM_PROVIDER    = {LLM.provider}")
+    logger.info(f"[CONFIG CHECK] LLM_BASE_URL    = {LLM.base_url}")
+    logger.info(f"[CONFIG CHECK] LLM_MODEL       = {LLM.model}")
+    logger.info(f"[CONFIG CHECK] LLM_API_KEY     = {'SET ✓' if LLM.api_key else 'MISSING ✗ — chat/voice will fail!'}")
+    logger.info(f"[CONFIG CHECK] STT_PROVIDER    = {STT.provider}")
+    logger.info(f"[CONFIG CHECK] STT_API_KEY     = {'SET ✓' if (STT.soniox_api_key or STT.deepgram_api_key) else 'MISSING ✗'}")
+    logger.info(f"[CONFIG CHECK] TTS_PROVIDER    = {TTS.provider}")
+    logger.info(f"[CONFIG CHECK] TTS_API_KEY     = {'SET ✓' if (TTS.elevenlabs_api_key or TTS.svara_api_key) else '(none required for svara ws-only)'}")
+    logger.info(f"[CONFIG CHECK] AUTH_ENABLED    = {AUTH_ENABLED}")
+    from auth import get_secret_fingerprint
+    logger.info(f"[CONFIG CHECK] WEBUI_SECRET    = {'SET ✓ fingerprint=' + get_secret_fingerprint() if get_secret_fingerprint() else 'MISSING ✗ — JWT auth will fail!'}")
+    logger.info(f"[CONFIG CHECK] PORT            = {PORT}")
+    logger.info("[CONFIG CHECK] ─────────────────────────────────────")
+
+    if not LLM.api_key:
+        logger.error(
+            "[CONFIG CHECK] FATAL: LLM_API_KEY is empty! "
+            "On Railway, set LLM_API_KEY (or LLM_GROQ_API_KEY) in the Variables panel. "
+            "The .env file is NOT loaded in Railway deployments."
+        )
+
     # Initialize classroom database
     await room_manager.init_db()
     yield
@@ -214,6 +243,19 @@ async def chat_completion(req: ChatRequest):
     api_key = LLM_API_KEY
     base_url = LLM_BASE_URL
     model = req.model or LLM_MODEL
+
+    # Guard: empty api_key produces httpx.LocalProtocolError ("Illegal header value b'Bearer '")
+    # This happens on Railway when LLM_API_KEY is not set in the Variables panel.
+    # The .env file is NOT loaded on Railway — all vars must be set in the dashboard.
+    if not api_key:
+        logger.error(
+            "[CHAT] LLM_API_KEY is empty — cannot call LLM. "
+            "On Railway: set LLM_API_KEY in the Variables panel."
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="LLM API key not configured. Set LLM_API_KEY in Railway Variables."
+        )
 
     # System prompt for Mira text tutor mode (composed from versioned files)
     prompt_mode = "text"
