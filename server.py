@@ -233,6 +233,57 @@ class ChatRequest(BaseModel):
     stream: Optional[bool] = True
     user_name: Optional[str] = None
     topic: Optional[str] = None
+    mode: Optional[str] = "text"
+
+# Global Math Agent instance
+from agents.math_agent import MathAgent
+_math_agent = MathAgent()
+
+def _resolve_persona_and_context(topic: Optional[str] = None, user_name: Optional[str] = None, base_mode: str = "text") -> str:
+    """
+    Resolve the final system prompt by combining versioned persona files,
+    student context, and curriculum context based on the provided topic.
+    """
+    prompt_mode = base_mode
+    topic_name = topic
+    
+    # Resolve math curriculum
+    if topic:
+        mm = get_maths_manager()
+        _topic_obj = mm.get_topic(str(topic))
+        if _topic_obj:
+            if prompt_mode != "maths-agent":
+                prompt_mode = "math-word-problems"
+            # Resolve human-readable name instead of raw index (e.g. "15")
+            topic_name = _topic_obj.get("improved_topic_name") or _topic_obj.get("original_topic") or topic
+
+    prompt_content = load_system_prompt(version=PROMPT_VERSION, mode=prompt_mode)
+
+    # Inject dynamic student context
+    context_lines = []
+    if user_name:
+        context_lines.append(f"Name: {user_name}")
+    if topic_name:
+        context_lines.append(f"Topic: {topic_name}")
+    if context_lines:
+        prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
+
+    # Inject curriculum context
+    if topic:
+        if prompt_mode == "math-word-problems":
+            mm = get_maths_manager()
+            maths_ctx = mm.get_context_for_topic(str(topic))
+            if maths_ctx:
+                prompt_content += "\n\n" + maths_ctx + "\n"
+        else:
+            from curriculum_manager import get_curriculum_manager
+            cm = get_curriculum_manager()
+            if cm.available:
+                curriculum_ctx = cm.get_context_for_topic(topic)
+                if curriculum_ctx:
+                    prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
+                    
+    return prompt_content
 
 @app.post("/chat", dependencies=[Depends(_require_jwt)])
 async def chat_completion(req: ChatRequest):
@@ -254,43 +305,28 @@ async def chat_completion(req: ChatRequest):
             detail="LLM API key not configured. Set LLM_API_KEY in Railway Variables."
         )
 
-    # System prompt for Mira text tutor mode (composed from versioned files)
-    prompt_mode = "text"
-    topic_name = req.topic  # default: use topic as-is for STUDENT CONTEXT
-    if req.topic:
-        mm = get_maths_manager()
-        _topic_obj = mm.get_topic(str(req.topic))
-        if _topic_obj:
-            prompt_mode = "math-word-problems"
-            # Resolve human-readable name instead of raw index (e.g. "15")
-            topic_name = _topic_obj.get("improved_topic_name") or _topic_obj.get("original_topic") or req.topic
+    # If mode is maths-agent, route to the specialized Agent Orchestrator
+    if req.mode == "maths-agent" and req.topic:
+        session_id = f"sess_{req.topic}_{req.user_name or 'anon'}"
+        # We assume the last message in history is the user's latest query
+        latest_user_message = req.messages[-1].content if req.messages else ""
+        
+        async def agent_generate():
+            async for chunk in _math_agent.handle_chat(
+                session_id=session_id,
+                user_input=latest_user_message,
+                topic_id=req.topic,
+                student_name=req.user_name,
+                history=[m.dict() for m in req.messages]
+            ):
+                # Wrap in SSE format
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n"
+            yield "data: [DONE]\n\n"
 
-    prompt_content = load_system_prompt(version=PROMPT_VERSION, mode=prompt_mode)
+        return StreamingResponse(agent_generate(), media_type="text/event-stream")
 
-    # Inject dynamic student context
-    context_lines = []
-    if req.user_name:
-        context_lines.append(f"Name: {req.user_name}")
-    if topic_name:
-        context_lines.append(f"Topic: {topic_name}")
-    if context_lines:
-        prompt_content += "\n\n--- STUDENT CONTEXT ---\n" + "\n".join(context_lines) + "\n"
-
-    # Inject curriculum context
-    if req.topic:
-        if prompt_mode == "math-word-problems":
-            mm = get_maths_manager()
-            maths_ctx = mm.get_context_for_topic(str(req.topic))
-            if maths_ctx:
-                prompt_content += "\n\n" + maths_ctx + "\n"
-        else:
-            from curriculum_manager import get_curriculum_manager
-            cm = get_curriculum_manager()
-            if cm.available:
-                curriculum_ctx = cm.get_context_for_topic(req.topic)
-                if curriculum_ctx:
-                    prompt_content += "\n\n--- CURRICULUM CONTEXT (SCIENCE) ---\n" + curriculum_ctx + "\n"
-
+    # Resolve system prompt with persona and context
+    prompt_content = _resolve_persona_and_context(topic=req.topic, user_name=req.user_name, base_mode="text")
     system_msg = {"role": "system", "content": prompt_content}
 
     # Truncate history to avoid LLM context limits
@@ -441,6 +477,10 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 logger.warning("Invalid system_prompt type, ignoring")
                 system_prompt = None
 
+            # Extract new Mira fields
+            topic = data.get("topic")
+            user_name = data.get("user_name")
+
             # Extract and validate context
             context = data.get("context")
             if context:
@@ -490,6 +530,8 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 "speaker_language": speaker_language,
                 "language": language,
                 "token": token,
+                "topic": topic,
+                "user_name": user_name
             }
         else:
             logger.info("First message was not a config message, using defaults")
@@ -504,6 +546,8 @@ async def receive_client_config(websocket: WebSocket, timeout: float = 5.0) -> d
                 "speaker_language": None,
                 "language": None,
                 "token": None,
+                "topic": None,
+                "user_name": None
             }
 
     except asyncio.TimeoutError:
@@ -634,14 +678,28 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         room_id = config.get("room_id")
         speaker_id = config.get("speaker_id")
-        ws_session_mode = "classroom" if room_id else "tutor"
-        _metrics_collector.session_start(mode=ws_session_mode)
-
         extra_processors = None
         classroom_system_prompt = config.get("system_prompt")
+        topic_id = config.get("topic")
+        user_name = config.get("user_name")
         skip_greeting = not bool(config.get("enable_greeting", False))
         context_messages = config.get("context")
         stt_language_hints = None
+
+        # Resolve system prompt if not in classroom mode
+        if not room_id:
+            # If topic provided, resolve math curriculum/persona
+            if topic_id:
+                classroom_system_prompt = _resolve_persona_and_context(
+                    topic=topic_id, 
+                    user_name=user_name, 
+                    base_mode="voice"
+                )
+                ws_session_mode = "math-word-problems"
+                logger.info(f"[TUTOR] Loading math word problem persona for topic {topic_id}")
+            else:
+                # Default voice persona
+                ws_session_mode = "tutor"
 
         # Tutor mode: enforce STT language allowlist from registered language.
         # Priority:
@@ -662,6 +720,7 @@ async def websocket_endpoint(websocket: WebSocket):
             )
 
         if room_id:
+            ws_session_mode = "classroom"
             room = room_manager.get_room(room_id)
             if not room:
                 await websocket.send_json({"type": "error", "message": "Room not found"})
@@ -692,6 +751,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     f"[CLASSROOM] Seeding pipeline with {len(context_messages)} prior messages "
                     f"from room {room_id} (skipping greeting)"
                 )
+
+        # Record session start in metrics
+        _metrics_collector.session_start(mode=ws_session_mode)
 
         await run_bot(
             websocket=websocket,
