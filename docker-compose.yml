@@ -1,7 +1,7 @@
 # ============================================
 # MiraVoiceAI Local Testing Stack
 # ============================================
-# 
+#
 # Usage:
 #   1. Copy env.example to .env and add your API keys
 #   2. docker compose up --build
@@ -41,7 +41,7 @@ services:
       - mira-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:7860/health" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -56,7 +56,7 @@ services:
       context: ../mira_openwebui
       dockerfile: Dockerfile
       args:
-        - USE_SLIM=true  # Skip downloading large ML models for faster build
+        - USE_SLIM=true # Skip downloading large ML models for faster build
     container_name: mira-voice-webui
     ports:
       - "3005:8080"
@@ -65,7 +65,7 @@ services:
       - PIPECAT_ENABLED=true
       - PIPECAT_API_URL=http://localhost:7860
       - PIPECAT_CONNECTION_MODE=websocket
-      
+
       # Enable real auth:
       # - First account can still be created as admin (initial bootstrap)
       # - Public signup stays disabled until admin enables it from Admin panel
@@ -74,14 +74,21 @@ services:
       - ENABLE_INITIAL_ADMIN_SIGNUP=true
       # Shared JWT secret with Pipecat — must match WEBUI_SECRET_KEY above
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}
-      
+
       # Use OpenAI for text chat
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_API_BASE_URL=https://api.openai.com/v1
-      
+
+      # One-by-One Audio Functionality configuration
+      - AUDIO_TTS_ENGINE=elevenlabs
+      - AUDIO_TTS_ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - AUDIO_STT_ENGINE=deepgram
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - AUDIO_STT_MODEL=nova-3
+
       # Ollama (if running locally)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      
+
     volumes:
       - open-webui-data:/app/backend/data
     networks:
@@ -128,7 +135,7 @@ services:
       - mira-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:7860/health" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -201,7 +208,7 @@ services:
       mira-voice:
         condition: service_healthy
     profiles:
-      - test  # Only runs when explicitly requested
+      - test # Only runs when explicitly requested
 
   # ── OSS Regression Target (Svara TTS + OSS LLM) ──────────────
   # DEFAULT regression target — run this regularly
@@ -210,7 +217,7 @@ services:
       context: .
       dockerfile: tests/Dockerfile
     container_name: mira-test-oss
-    entrypoint: ["python", "tests/run_all_tests.py", "--target", "oss"]
+    entrypoint: [ "python", "tests/run_all_tests.py", "--target", "oss" ]
     env_file:
       - .env
     environment:
@@ -227,7 +234,7 @@ services:
       context: .
       dockerfile: tests/Dockerfile
     container_name: mira-test-elevenlabs
-    entrypoint: ["python", "tests/run_all_tests.py", "--target", "elevenlabs"]
+    entrypoint: [ "python", "tests/run_all_tests.py", "--target", "elevenlabs" ]
     env_file:
       - .env
     environment:
@@ -247,7 +254,7 @@ services:
       context: .
       dockerfile: soak_test/Dockerfile
     container_name: mira-soak-test-oss
-    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "oss"]
+    entrypoint: [ "python", "soak_test/run_soak_test.py", "--target", "oss" ]
     env_file:
       - .env
     environment:
@@ -264,7 +271,7 @@ services:
       context: .
       dockerfile: soak_test/Dockerfile
     container_name: mira-soak-test-elevenlabs
-    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "elevenlabs"]
+    entrypoint: [ "python", "soak_test/run_soak_test.py", "--target", "elevenlabs" ]
     env_file:
       - .env
     environment:
@@ -281,7 +288,7 @@ services:
       context: .
       dockerfile: soak_test/Dockerfile
     container_name: mira-soak-test-local
-    entrypoint: ["python", "soak_test/run_soak_test.py", "--target", "local"]
+    entrypoint: [ "python", "soak_test/run_soak_test.py", "--target", "local" ]
     env_file:
       - .env
     environment:
@@ -316,7 +323,7 @@ services:
       open-webui:
         condition: service_started
     profiles:
-      - test  # Only runs when explicitly requested
+      - test # Only runs when explicitly requested
 
 networks:
   mira-network:
