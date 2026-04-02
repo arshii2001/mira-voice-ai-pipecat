@@ -53,8 +53,8 @@ services:
   # ============================================
   open-webui:
     build:
-      context: ../mira_openwebui
-      dockerfile: Dockerfile
+      context: ../mira-openwebui
+      dockerfile: Dockerfile.railway
       args:
         - USE_SLIM=true # Skip downloading large ML models for faster build
     container_name: mira-voice-webui
